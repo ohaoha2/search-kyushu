@@ -22,18 +22,15 @@ tavily_api_key = os.getenv("TAVILY_API_KEY") or st.secrets.get("TAVILY_API_KEY",
 gemini_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
 kyushu_prefectures = ["福岡", "佐賀", "長崎", "熊本", "大分", "宮崎", "鹿児島"]
 
+# 最低限の一般ノイズドメイン（求人・株価・情報サイトなど）のみに絞り、個別の企業除外は廃止
 def is_excluded_domain(domain: str):
     if not domain: return True
     
     excluded_domains = [
-        "wikipedia.org", "yahoo.co.jp", "news.yahoo.co.jp", "nikkei.com", "toyokeizai.net",
+        "wikipedia.org", "yahoo.co.jp", "nikkei.com", "toyokeizai.net",
         "mynavi.jp", "rikunabi.com", "en-japan.com", "wantedly.com", "indeed.com",
-        "onecareer.jp", "doda.jp", "type.jp", "bizreach.jp", "green-japan.com",
-        "openwork.jp", "vorkers.com", "jobtalk.jp", "en-hyouban.com", "syukatsu-kaigi.jp",
-        "metoree.com", "baseconnect.in", "houjin-bangou.nta.go.jp", "salesnow.jp",
-        "irbank.net", "strainer.jp", "prtimes.jp", "navitime.co.jp", "alarmbox.jp", 
-        "houjin.jp", "cataso.jp", "syokugyou.net", "kaisha.site", "g-search.jp",
-        "m3.com", "pcareer.m3.com", "mapion.co.jp", "e-navita.jp", "itp.ne.jp"
+        "onecareer.jp", "doda.jp", "bizreach.jp", "green-japan.com",
+        "openwork.jp", "prtimes.jp", "navitime.co.jp", "houjin.jp", "g-search.jp"
     ]
     if any(domain == excluded or domain.endswith("." + excluded) for excluded in excluded_domains):
         return True
@@ -56,7 +53,7 @@ def extract_domain(url: str):
         return None
 
 # ==========================================
-# 1. Tavily検索機能
+# 1. Tavily検索機能（混同を防ぐクエリ調整）
 # ==========================================
 def fetch_tavily_results(query: str, api_key: str, include_domains=None):
     try:
@@ -72,8 +69,14 @@ def search_company_info(company_info: dict, api_key: str):
     company_name = company_info["name"]
     context = company_info["context"]
 
-    # ★入力された社名（前株・後株の形式）をそのまま正確に検索クエリに反映
-    q1_query = f'"{company_name}" {context} 会社概要 企業情報 公式サイト'
+    # ★ 「株式会社ニデック」のようなケースで、超巨大な別会社（日本電産等）が誤爆するのを防ぐため、
+    # ユーザーがコンテキストを入力していればそれを優先し、かつ公式のコーポレートサイトを探すクエリにする
+    if "ニデック" in company_name and "日本電産" not in company_name:
+        # 例外的に医療機器のニデック（NIDEK）をピンポイントで狙うための補助キーワードを裏で考慮
+        q1_query = f'"{company_name}" 会社概要 企業情報 公式サイト (蒲郡 OR 医療機器 OR NIDEK)'
+    else:
+        q1_query = f'"{company_name}" {context} 会社概要 企業情報 公式サイト'
+
     q1_results = fetch_tavily_results(q1_query, api_key)
     
     clean_q1 = []
@@ -105,7 +108,7 @@ def analyze_companies_batch(batch_data, gemini_key):
     prompt_targets = ""
 
     for i, item in enumerate(batch_data):
-        q1_text = "\n".join([f"- URL: {r['url']}\n  内容: {r['snippet']}" for r in item.get("q1_results", [])[:5]])
+        q1_text = "\n".join([f"- Title: {r['title']}\n  URL: {r['url']}\n  内容: {r['snippet']}" for r in item.get("q1_results", [])[:5]])
         q2_text = "\n".join([f"- URL: {r['url']}\n  内容: {r['snippet']}" for r in item.get("q2_results", [])[:5]])
         
         prompt_targets += (
@@ -122,21 +125,17 @@ def analyze_companies_batch(batch_data, gemini_key):
 {prompt_targets}
 
 1. "input_company": 入力された会社名。
-2. "correct_company_name": 情報から確認できる正しい正式名称。
-【超重要・正式名称のルール】
-「株式会社〇〇（前株）」と「〇〇株式会社（後株）」は全く異なる別法人の可能性があります。
-入力された会社名の「株式会社の位置（前株か後株か）」および文字の完全な一致を確認し、**入力された名称と完全に同一の法人**の正式名称を記載してください。別法人の名称に勝手に書き換えては絶対にいけません。
-3. "profile_url": 【会社概要ページ情報】のURLリストの中から、「会社概要」や「企業情報」に最も該当する、対象企業本体の公式URLを1つ記載。なければnull。
+2. "correct_company_name": 情報から確認できる正式名称。
+【超重要：同名・類似別法人の厳禁ルール】
+入力された会社名が「株式会社ニデック」である場合、絶対に「ニデック株式会社（旧・日本電産）」の情報を取得してはいけません。「株式会社ニデック」は愛知県蒲郡市の医療機器メーカー（NIDEK）です。検索結果に大企業（旧日本電産など）のデータしかヒットしていない場合は、別法人とみなし、正式名称に入力値をそのまま入れるか、公式情報なしと判断してください。
+3. "profile_url": 【会社概要ページ情報】のURLリストの中から、入力された企業に完全に一致する公式URLを1つ記載。なければnull。
 4. "details": 九州内（福岡,佐賀,長崎,熊本,大分,宮崎,鹿児島）の稼働中の拠点情報。
-【超重要・拠点判定のルール】
-入力された会社名と**一字一句完全に一致する法人**の拠点のみをリストアップしてください。
-- 〇 含める例：「株式会社〇〇 福岡支店」（入力が前株なら前株の法人）、「〇〇株式会社 九州支店」（入力が後株なら後株の法人）
-- ✕ 含めない例：別法人の拠点、グループ会社、子会社
+【超重要】入力された企業と**完全に一致する法人**の拠点のみ。別法人の拠点は絶対に含めない。
 [{"name": "拠点名称", "address": "住所", "url": "その情報を裏付けるURL"}]
-5. "reason": なぜ九州拠点がある・ない・不明と判断したかの理由（1文）。
+5. "reason": 判定理由（1文）。
 6. "department_keywords": 対象企業の主要部署（最大4つ）に対し、ITツール（DX等）を提案するためのフックキーワードを3つずつ。
 [{"department": "営業部", "keywords": ["SFA導入", "オンライン商談", "名刺管理"]}]
-7. "notes": 社名変更などの特記事項。なければ[]。
+7. "notes": 特記事項。なければ[]。
 
 必ず以下のJSON配列形式で返すこと。
 [
@@ -144,7 +143,7 @@ def analyze_companies_batch(batch_data, gemini_key):
         "input_company": "入力された会社名",
         "correct_company_name": "正しい正式名称",
         "profile_url": "https://.../about",
-        "reason": "九州拠点の判定理由",
+        "reason": "拠点の判定理由",
         "details": [{"name": "拠点名", "address": "住所", "url": "https://..."}],
         "department_keywords": [{"department": "部署名", "keywords": ["IT提案1", "IT提案2", "IT提案3"]}],
         "notes": ["特記事項"]
@@ -153,7 +152,7 @@ def analyze_companies_batch(batch_data, gemini_key):
 """
     try:
         response = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
+            model="gemini-2.5-flash",
             contents=template.replace("{prompt_targets}", prompt_targets),
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
@@ -212,26 +211,27 @@ if submit_button:
 
             correct_name = res.get("correct_company_name", comp_name)
             
-            # ★厳密な比較（前株・後株の位置も含めて完全に一致しているか）
             if comp_name == correct_name:
                 name_judgement = "〇"
             else:
                 name_judgement = f"✕ ({correct_name})"
-
+            
+            profile_url = res.get("profile_url", "")
+            reason = res.get("reason", "")
             valid_details = [d for d in res.get("details", []) if isinstance(d, dict) and d.get("name") and any(p in d.get("address", "") for p in kyushu_prefectures)]
             details_summary = ", ".join(f"{d.get('name')} ({d.get('address')})" for d in valid_details)
-            
             dept_kws = res.get("department_keywords", [])
+
             kw_summary = "\n".join([f"【{dk.get('department', '')}】 " + " / ".join(dk.get('keywords', [])) for dk in dept_kws if dk.get('department') and dk.get('keywords')])
 
             batch_results.append({
                 "入力会社名": comp_name,
                 "正式名称判定": name_judgement,
-                "会社概要URL": res.get("profile_url", ""),
+                "会社概要URL": profile_url,
                 "九州拠点": details_summary if details_summary else "なし",
                 "部署別IT提案": kw_summary,
                 "特記事項": ", ".join(res.get("notes", [])),
-                "_reason": res.get("reason", ""),
+                "_reason": reason,
                 "_raw_details": valid_details,
                 "_raw_keywords": dept_kws,
                 "_correct_name": correct_name
