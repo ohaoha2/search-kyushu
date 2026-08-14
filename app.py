@@ -238,7 +238,6 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
             "公式サイト": st.column_config.LinkColumn(
                 "公式サイト",
                 help="クリックすると公式HPが開きます",
-                display_url=".*"
             )
         },
         use_container_width=True
