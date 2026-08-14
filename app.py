@@ -31,7 +31,8 @@ def is_excluded_domain(domain: str):
         "openwork.jp", "vorkers.com", "jobtalk.jp", "en-hyouban.com", "syukatsu-kaigi.jp",
         "metoree.com", "baseconnect.in", "houjin-bangou.nta.go.jp", "salesnow.jp",
         "irbank.net", "strainer.jp", "prtimes.jp", "navitime.co.jp", "alarmbox.jp", 
-        "houjin.jp", "cataso.jp", "syokugyou.net", "kaisha.site", "g-search.jp"
+        "houjin.jp", "cataso.jp", "syokugyou.net", "kaisha.site", "g-search.jp",
+        "m3.com", "pcareer.m3.com" # ★医療・求人系を追加
     ]
     return any(domain == excluded or domain.endswith("." + excluded) for excluded in excluded_domains)
 
@@ -45,7 +46,7 @@ def extract_domain(url: str):
         return None
 
 # ==========================================
-# 1. Tavily検索機能（シンプル化）
+# 1. Tavily検索機能
 # ==========================================
 def fetch_tavily_results(query: str, api_key: str, include_domains=None):
     try:
@@ -58,12 +59,9 @@ def fetch_tavily_results(query: str, api_key: str, include_domains=None):
         return []
 
 def determine_official_domain(company_name: str, search_results: list):
-    """Q1の結果から、最もスコアの高い公式ドメインを1つだけ決定する"""
     for r in search_results:
         domain = extract_domain(r["url"])
         if is_excluded_domain(domain): continue
-        # 今回はシンプルに、一番最初に見つかった除外リスト以外のドメインを公式とみなす
-        # （Tavilyは関連度順に返すため、上位の独自ドメインが公式である確率が極めて高い）
         return domain
     return None
 
@@ -71,16 +69,16 @@ def search_company_info(company_info: dict, api_key: str):
     company_name = company_info["name"]
     context = company_info["context"]
 
-    # Q1: 公式ドメインと会社概要を特定する検索
+    # Q1: 公式サイト検索
     q1_query = f'"{company_name}" {context} 会社概要 企業情報 公式サイト'
     q1_results = fetch_tavily_results(q1_query, api_key)
     
     official_domain = determine_official_domain(company_name, q1_results)
     
-    # 公式ドメインが特定できたら、そのドメイン内の結果だけを抽出
+    # 公式ドメイン内の結果のみ抽出
     filtered_q1 = [r for r in q1_results if extract_domain(r["url"]) == official_domain] if official_domain else []
     
-    # Q2: 特定した公式ドメイン内での拠点検索（公式ドメインがなければスキップ）
+    # Q2: 拠点検索
     q2_results = []
     if official_domain:
         q2_query = f'site:{official_domain} 拠点 OR 事業所 OR 支店 OR 営業所 OR 福岡 OR 九州'
@@ -88,8 +86,8 @@ def search_company_info(company_info: dict, api_key: str):
 
     return {
         "official_domain": official_domain,
-        "q1_results": filtered_q1,  # 純度100%の公式情報のみ
-        "q2_results": q2_results    # 純度100%の公式情報のみ
+        "q1_results": filtered_q1,
+        "q2_results": q2_results
     }
 
 # ==========================================
@@ -100,7 +98,6 @@ def analyze_companies_batch(batch_data, gemini_key):
     prompt_targets = ""
 
     for i, item in enumerate(batch_data):
-        # AIには、すでにPython側でフィルタリングされた「公式情報」だけを渡す
         q1_text = "\n".join([f"- URL: {r['url']}\n  内容: {r['snippet']}" for r in item.get("q1_results", [])[:3]])
         q2_text = "\n".join([f"- URL: {r['url']}\n  内容: {r['snippet']}" for r in item.get("q2_results", [])[:5]])
         
@@ -111,6 +108,7 @@ def analyze_companies_batch(batch_data, gemini_key):
             f"【拠点・事業所情報】\n{q2_text if q2_text else '情報なし'}\n"
         )
 
+    # ★プロンプトの修正: 拠点判定の厳格化
     template = """
 あなたは企業の所在調査とIT提案のプロフェッショナルです。
 以下の複数企業について調査し、必ずJSON配列で返してください。
@@ -120,10 +118,13 @@ def analyze_companies_batch(batch_data, gemini_key):
 
 1. "input_company": 入力された会社名。
 2. "correct_company_name": 【会社概要ページ情報】から確認できる正しい正式名称（例：株式会社〇〇）。
-3. "profile_url": 【会社概要ページ情報】に含まれるURLの中から、「会社概要」や「企業情報」に最も該当するURLを1つ記載。なければnull。
+3. "profile_url": 【会社概要ページ情報】に含まれるURLの中から、「会社概要」や「企業情報」に該当するURLを1つ記載。なければnull。
 4. "details": 九州内（福岡,佐賀,長崎,熊本,大分,宮崎,鹿児島）の稼働中の拠点情報。
+【超重要・拠点判定のルール】
+拠点としてリストアップするのは、「入力された会社名」または「正しい正式名称」と**完全に同一の法人**の拠点のみです。
+（例：ニデック株式会社を調査中に、ニデックテクノモータ株式会社などの「グループ会社」「子会社」「関連会社」の拠点が記載されていても、絶対にここには含めないでください。完全に別法人です。）
 [{"name": "拠点名称", "address": "住所", "url": "その情報を裏付けるURL"}]
-5. "reason": なぜ九州拠点がある・ない・不明と判断したかの理由（1文）。
+5. "reason": なぜ九州拠点がある・ない・不明と判断したかの理由（1文）。グループ会社の拠点しかない場合は「グループ会社の拠点は確認できたが、本体の拠点はない」としてください。
 6. "department_keywords": 対象企業の主要部署（最大4つ）に対し、ITツール（DX等）を提案するためのフックキーワードを3つずつ。
 [{"department": "営業部", "keywords": ["SFA導入", "オンライン商談", "名刺管理"]}]
 7. "notes": 社名変更などの特記事項。なければ[]。
@@ -203,6 +204,18 @@ if submit_button:
             comp_name = comp_info["name"]
             res = company_map.get(comp_name, {})
 
+            # ★正式名称の判定
+            correct_name = res.get("correct_company_name", comp_name)
+            # 全角半角・空白・株式会社の位置などを大まかに無視して比較
+            clean_comp_name = comp_name.replace(" ", "").replace(" ", "").replace("株式会社", "").replace("（株）", "")
+            clean_correct_name = correct_name.replace(" ", "").replace(" ", "").replace("株式会社", "").replace("（株）", "")
+            
+            if clean_comp_name == clean_correct_name:
+                name_judgement = "〇"
+            else:
+                name_judgement = f"✕ ({correct_name})"
+
+
             valid_details = [d for d in res.get("details", []) if isinstance(d, dict) and d.get("name") and any(p in d.get("address", "") for p in kyushu_prefectures)]
             details_summary = ", ".join(f"{d.get('name')} ({d.get('address')})" for d in valid_details)
             
@@ -211,14 +224,15 @@ if submit_button:
 
             batch_results.append({
                 "入力会社名": comp_name,
-                "正式名称": res.get("correct_company_name", comp_name),
+                "正式名称判定": name_judgement, # ★変更
                 "会社概要URL": res.get("profile_url", ""),
                 "九州拠点": details_summary if details_summary else "なし",
                 "部署別IT提案": kw_summary,
                 "特記事項": ", ".join(res.get("notes", [])),
                 "_reason": res.get("reason", ""),
                 "_raw_details": valid_details,
-                "_raw_keywords": dept_kws
+                "_raw_keywords": dept_kws,
+                "_correct_name": correct_name
             })
 
         progress_bar.progress(1.0)
@@ -233,7 +247,8 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
     st.divider()
     st.subheader("検索・分析結果一覧")
     
-    df_table = pd.DataFrame(results)[["入力会社名", "正式名称", "会社概要URL", "九州拠点", "部署別IT提案", "特記事項"]]
+    # 表示用カラムを調整
+    df_table = pd.DataFrame(results)[["入力会社名", "正式名称判定", "会社概要URL", "九州拠点", "部署別IT提案", "特記事項"]]
     st.dataframe(df_table, column_config={"会社概要URL": st.column_config.LinkColumn("会社概要URL")}, use_container_width=True)
 
     with st.expander("スプレッドシート用コピー"):
@@ -243,7 +258,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
     st.subheader("各社詳細・IT提案カンペ")
     for row in results:
         with st.container():
-            st.markdown(f"### {row['正式名称']} （入力: {row['入力会社名']}）")
+            st.markdown(f"### {row['_correct_name']} （入力: {row['入力会社名']}）")
             st.markdown(f"**会社概要URL:** {row['会社概要URL'] or '確認できず'}")
             st.info(f"**九州拠点の状況:** {row['_reason']}")
             
