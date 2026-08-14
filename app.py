@@ -120,7 +120,7 @@ def analyze_companies_batch(batch_data, gemini_key):
     """
     try:
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-3.5-flash-lite',
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
