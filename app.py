@@ -107,7 +107,7 @@ def analyze_companies_batch(batch_data, gemini_key):
 4. "details": 九州内の拠点ごとの詳細情報（名称, 住所, URL）のリスト（見つからない場合は空配列 []）
 5. "sales_keywords": 営業アプローチ用のキーワード10個のリスト
 
-必ず以下のJSON配列フォーマットのみで回答してください（マークダウンの ```json や ``` で囲んでも構いません）：
+必ず以下のJSON配列フォーマットのみで回答してください：
 [
     {{
         "company": "会社名",
@@ -120,7 +120,7 @@ def analyze_companies_batch(batch_data, gemini_key):
     """
     try:
         response = client.models.generate_content(
-            model='gemini-3.5-flash-lite',
+            model='gemini-2.0-flash',
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
@@ -161,7 +161,6 @@ if submit_button:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # キャッシュ未登録の会社をピックアップ、登録済みのものは再利用
         to_fetch = []
         company_map = {}
 
@@ -182,9 +181,7 @@ if submit_button:
             })
             progress_bar.progress((i + 1) / max(len(to_fetch), 1) * 0.5)
 
-        # 10社ずつに分割して一括AI分析（バッチ処理）
         chunk_size = 10
-        analyzed_results = []
         
         if fetched_data:
             status_text.text("🤖 AIによる一括分析を実行中...")
@@ -192,11 +189,9 @@ if submit_button:
                 chunk = fetched_data[i:i+chunk_size]
                 res_list = analyze_companies_batch(chunk, gemini_key)
                 
-                # リスト形式で返ってきた結果をマッピング
                 if isinstance(res_list, list):
                     for r in res_list:
                         comp_name = r.get("company")
-                        # フォールバック処理（公式サイトの補完）
                         if not r.get('official_url') or r.get('official_url') in ["null", ""]:
                             for item in chunk:
                                 if item['company'] == comp_name and item['raw_results']:
@@ -213,7 +208,6 @@ if submit_button:
                 
                 progress_bar.progress(0.5 + ((i + len(chunk)) / len(fetched_data)) * 0.5)
 
-        # 最終的な表示用データの構築
         for comp in company_list:
             res = company_map.get(comp, {
                 "is_found": False,
@@ -223,9 +217,10 @@ if submit_button:
             })
 
             is_found_str = "⭕ 九州拠点あり" if res.get('is_found') else "❌ 拠点なし"
+            
             official_url = res.get('official_url')
             if not official_url or official_url in ["null", ""]: 
-                official_url = None
+                official_url = "なし"
             
             details_summary = ", ".join([f"{d.get('name')} ({d.get('address')})" for d in res.get('details', [])])
             keywords_summary = ", ".join(res.get('sales_keywords', []))
@@ -257,12 +252,6 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
     
     st.dataframe(
         df_display,
-        column_config={
-            "公式サイト": st.column_config.LinkColumn(
-                "公式サイト",
-                help="クリックすると公式HPが開きます"
-            )
-        },
         use_container_width=True
     )
 
@@ -285,8 +274,10 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
     
     for r in results:
         with st.expander(f"{r['会社名']} ── 【 {r['判定']} 】"):
-            if r['公式サイト']:
+            if r['公式サイト'] and r['公式サイト'] != "なし":
                 st.markdown(f"**🌐 公式サイト:** [{r['公式サイト']}]({r['公式サイト']})")
+            else:
+                st.markdown("**🌐 公式サイト:** なし")
             
             if r['_raw_keywords']:
                 st.markdown("**🔑 フックキーワード:**")
