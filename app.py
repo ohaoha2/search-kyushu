@@ -68,7 +68,7 @@ def search_ddg_lite(keyword: str):
 # 2. JSONパースの安全装置付き・分析関数
 # ==========================================
 def safe_parse_json(text):
-    """Geminiの出力から確実theにJSON部分だけを抜き出してパースする関数"""
+    """Geminiの出力から確実にJSON部分だけを抜き出してパースする関数"""
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -155,7 +155,7 @@ if submit_button:
                             
                             keywords = result.get('sales_keywords', [])
                             if keywords:
-                                st.markdown("### 🔑 DX営業アプローチキーワード")
+                                st.markdown("### 🔑 フックキーワード")
                                 keywords_md = " ".join([f"`{kw}`" for kw in keywords])
                                 st.markdown(keywords_md)
                             
