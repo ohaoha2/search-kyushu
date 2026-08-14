@@ -1,56 +1,97 @@
 import streamlit as st
 import json
 import os
+import re
+import requests
+from bs4 import BeautifulSoup
 from google import genai
 from google.genai import types
-from duckduckgo_search import DDGS
 
 st.set_page_config(page_title="九州拠点・DX営業リサーチ", page_icon="✨")
 
-st.title("✨ 九州拠点・DX営業リサーチツール（DuckDuckGo ＋ gemini-3.5-flash）")
-st.write("DuckDuckGo検索でWeb情報を取得し、gemini-3.5-flashで正確にリサーチします。")
+st.title("✨ 九州拠点・DX営業リサーチツール（DDG Lite ＋ gemini-3.5-flash）")
+st.write("DuckDuckGo Liteで確実なWeb検索を行い、gemini-3.5-flashで高精度に分析します。")
 
-# DuckDuckGoによる検索関数
-def search_web_with_ddg(query):
+# ==========================================
+# 1. DuckDuckGo Lite による検索関数
+# ==========================================
+def search_ddg_lite(keyword: str):
+    clean_kw = re.sub(r'[・"（）()]', ' ', keyword)
+    if clean_kw.replace("-", "").isdigit():
+        query = f"{clean_kw} 住所"
+    else:
+        query = f"{clean_kw} 九州 福岡 拠点 工場 支社"
+
+    url = "https://lite.duckduckgo.com/lite/"
+    data = {'q': query}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
     try:
-        search_query = f"{query} 会社 企業 拠点"
-        with DDGS() as ddgs:
-            results = list(ddgs.text(search_query, max_results=5))
+        res = requests.post(url, data=data, headers=headers, timeout=10)
+        soup = BeautifulSoup(res.text, "html.parser")
         
-        if not results:
-            return None, "DuckDuckGoの検索結果が見つかりませんでした。"
+        results = []
+        rows = soup.find_all("tr")
+        current_title = ""
+        current_url = ""
+        
+        for row in rows:
+            link_tag = row.find("a", class_="result-link")
+            if link_tag:
+                current_title = link_tag.text.strip()
+                current_url = link_tag["href"]
             
-        context = "\n".join([f"- タイトル: {r.get('title')}\n  内容: {r.get('body')}\n  URL: {r.get('href')}" for r in results])
-        return context, None
-    except Exception as e:
-        return None, f"DuckDuckGo検索エラー: {str(e)}"
+            snippet_tag = row.find("td", class_="result-snippet")
+            if snippet_tag:
+                current_snippet = snippet_tag.text.strip()
+                if current_title and current_url:
+                    results.append({
+                        'title': current_title,
+                        'url': current_url,
+                        'snippet': current_snippet
+                    })
+                    current_title = ""
+                    current_url = ""
 
-# Gemini 3.5 Flashによる分析関数
-def analyze_company_data(query, web_context, gemini_key):
+        if not results:
+            return None, "検索結果を取得できませんでした。"
+            
+        # コンテキスト文字列を作成
+        context = "\n".join([f"- タイトル: {r['title']}\n  内容: {r['snippet']}\n  URL: {r['url']}" for r in results[:5]])
+        return context, None
+
+    except Exception as e:
+        return None, f"検索エラー: {str(e)}"
+
+# ==========================================
+# 2. Gemini 3.5 Flash による分析関数
+# ==========================================
+def analyze_company_with_ai(query, web_context, gemini_key):
     client = genai.Client(api_key=gemini_key)
     
     prompt = f"""
     あなたは企業の所在調査およびDX営業戦略のプロフェッショナルです。
-    検索ターゲット: "{query}"
+    検索ターゲット（会社名、または電話番号）: "{query}"
 
-    【取得した最新のWeb検索結果】
+    【取得したWeb検索結果】
     {web_context}
 
     指示:
-    1. 上記のWeb検索結果を基に、入力された情報（会社名、または住所）に該当する「正確な企業名や施設名」を突き止めてください。
+    1. 上記の検索結果を基に、入力された情報に該当する「正確な企業名や施設名」を突き止めてください。
     2. 近隣の無関係な有名施設（例：ヤマハのテストコースなど）と絶対に混同せず、実際の事業者を正確に特定してください。
-    3. その企業が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に実在の直営拠点を持っているか調査してください。
-    4. 確証がある場合は "is_found": true とし、企業名・拠点名、正確な住所、URLを抽出してください。
-    5. 確証がない場合でも、検索結果から読み取れる情報を基にベストエフォートで判定してください。
-    6. "reasoning" は1〜2文で簡潔にまとめてください。
-    7. この企業へのDX営業代行アプローチで使えそうなキーワードや業界特性（10個）を "sales_keywords" の配列として抽出してください。
+    3. その企業が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島, 沖縄）に実在の直営拠点（支店、営業所、工場など）を持っているか調査してください。
+    4. 確証がある場合は "is_found": true とし、企業名・拠点名、正確な住所や地域、URLを抽出してください。
+    5. "reasoning" は1〜2文で簡潔な判定理由をまとめてください。
+    6. この企業へのDX営業代行アプローチで使えそうなキーワードや業界特性（10個）を "sales_keywords" の配列として抽出してください。
     
     必ず以下のJSONフォーマットのみで回答してください（Markdownのバッククォート ``` は使ず、純粋なJSON文字列だけで出力してください）。
     {{
         "is_found": true,
         "reasoning": "1〜2文の簡潔な判定理由",
         "details": [
-            {{"name": "企業名・拠点名", "address": "住所", "url": "URL"}}
+            {{"name": "企業名・拠点名", "address": "住所・地域", "url": "URL"}}
         ],
         "sales_keywords": ["キーワード1", "キーワード2", "キーワード3", "キーワード4", "キーワード5", "キーワード6", "キーワード7", "キーワード8", "キーワード9", "キーワード10"]
     }}
@@ -66,37 +107,37 @@ def analyze_company_data(query, web_context, gemini_key):
     
     return json.loads(response.text.strip())
 
-# 入力フォーム
-query = st.text_input("会社名、または住所を入力", placeholder="例: 株式会社ティーエフケー、静岡県袋井市宇刈137")
+# ==========================================
+# 3. Streamlit UI 構築
+# ==========================================
+query = st.text_input("会社名、または電話番号を入力", placeholder="例: ニデック、株式会社ティーエフケー")
 
-if st.button("検索＆リサーチを実行", type="primary"):
+if st.button("リサーチを実行", type="primary"):
     if not query:
-        st.warning("会社名または住所を入力してください。")
+        st.warning("会社名または電話番号を入力してください。")
     else:
         gemini_key = os.getenv("GEMINI_API_KEY")
         
         if not gemini_key:
-            st.error("⚠️ サーバーのVariablesにGEMINI_API_KEYが設定されていません。")
+            st.error("⚠️ サーバーのVariablesにAPIキー（GEMINI_API_KEY）が設定されていません。")
             st.stop()
 
-        with st.spinner(f"「{query}」をDuckDuckGoで検索中..."):
-            # 1. DuckDuckGoで検索
-            web_context, err = search_web_with_ddg(query)
+        with st.spinner(f"「{query}」をDuckDuckGo Liteで調査中..."):
+            web_context, err = search_ddg_lite(query)
             
             if err:
                 st.error(err)
             else:
-                # 検索結果の確認用エクスパンダー
-                with st.expander("🔍 DuckDuckGo検索エンジンの取得データ"):
+                with st.expander("🔍 取得したWeb検索の生データ"):
                     st.text(web_context)
                 
                 with st.spinner("gemini-3.5-flashで分析中..."):
                     try:
-                        result = analyze_company_data(query, web_context, gemini_key)
+                        result = analyze_company_with_ai(query, web_context, gemini_key)
                         
                         st.divider()
                         if result.get('is_found'):
-                            st.success(f"⭕ 該当する企業・拠点が正確に確認されました！")
+                            st.success(f"⭕ 該当する企業・拠点が確認されました！")
                             st.info(f"**判定理由:** {result.get('reasoning')}")
                             
                             keywords = result.get('sales_keywords', [])
