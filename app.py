@@ -87,7 +87,7 @@ def safe_parse_json(text):
         raise
 
 # ==========================================
-# 4. 分析関数
+# 4. 分析関数（公式サイトの検出精度を強化）
 # ==========================================
 def analyze_company_with_ai(query, web_context, gemini_key):
     client = genai.Client(api_key=gemini_key)
@@ -99,18 +99,16 @@ def analyze_company_with_ai(query, web_context, gemini_key):
     {web_context}
 
     指示:
-    1. 検索結果から対象企業の「公式HP」のURLを特定し、"official_url" に格納（見つからない場合は null）。
+    1. 検索結果の中から、対象企業の「公式サイト（コーポレートサイトのトップページ等）」のURLを最優先で特定し、"official_url" に格納してください。正確なURLが見つからない場合でも、検索結果のドメインから推測される公式サイトのURLを記述してください（nullにしないよう努めてください）。
     2. 入力された企業が九州地方（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に支店、営業所、工場、グループ拠点等の直営拠点を持っているかを徹底的に調査してください。少しでも九州における拠点や事業展開（福岡支店など）が確認できる場合は、必ず "is_found": true としてください。
     3. すでに閉業、閉鎖、廃止、移転完了している拠点は「存在しない（is_found: false）」と判定してください。
-    4. "reasoning" には、確認できた九州の拠点名を含めて簡潔な判定理由を記載してください。
-    5. 営業アプローチで有効なフックキーワードを "sales_keywords" に10個抽出してください。
-    6. 九州内の拠点ごとの詳細情報（名称、住所、詳細URL）を "details" リストに具体的にまとめてください。
+    4. 営業アプローチで有効なフックキーワードを "sales_keywords" に10個抽出してください。
+    5. 九州内の拠点ごとの詳細情報（名称、住所、詳細URL）を "details" リストに具体的にまとめてください。
 
     必ず以下のJSONフォーマットのみで回答してください：
     {{
         "is_found": trueまたはfalse,
-        "official_url": "公式サイトのURLまたはnull",
-        "reasoning": "1〜2文の簡潔な判定理由",
+        "official_url": "公式サイトのURL",
         "details": [
             {{"name": "企業名・拠点名", "address": "住所・地域", "url": "URL"}}
         ],
@@ -139,7 +137,6 @@ if submit_button:
     if not raw_input.strip():
         st.warning("会社名を入力してください。")
     else:
-        # 改行で分割し、タブ区切りの場合は1列目を会社名として抽出
         lines = raw_input.strip().split("\n")
         company_list = []
         for line in lines:
@@ -161,7 +158,6 @@ if submit_button:
         for i, comp in enumerate(company_list):
             status_text.text(f"処理中 ({i+1}/{total}): {comp}")
             
-            # キャッシュがあればそれを使用
             if comp in st.session_state.result_cache:
                 cached_data = st.session_state.result_cache[comp]
                 res = cached_data["result"]
@@ -171,8 +167,7 @@ if submit_button:
                     if err:
                         res = {
                             "is_found": False,
-                            "official_url": None,
-                            "reasoning": f"検索エラー: {err}",
+                            "official_url": "",
                             "details": [],
                             "sales_keywords": []
                         }
@@ -186,16 +181,14 @@ if submit_button:
                 except Exception as e:
                     res = {
                         "is_found": False,
-                        "official_url": None,
-                        "reasoning": f"分析エラー: {str(e)}",
+                        "official_url": "",
                         "details": [],
                         "sales_keywords": []
                     }
 
-            # 結果の整形
             is_found_str = "⭕ 九州拠点あり" if res.get('is_found') else "❌ 拠点なし"
             official_url = res.get('official_url')
-            if official_url == "null": official_url = ""
+            if not official_url or official_url == "null": official_url = "なし"
             
             details_summary = ", ".join([f"{d.get('name')} ({d.get('address')})" for d in res.get('details', [])])
             keywords_summary = ", ".join(res.get('sales_keywords', []))
@@ -203,8 +196,7 @@ if submit_button:
             batch_results.append({
                 "会社名": comp,
                 "判定": is_found_str,
-                "公式サイト": official_url if official_url else "なし",
-                "判定理由": res.get('reasoning'),
+                "公式サイト": official_url,
                 "確認された拠点": details_summary if details_summary else "なし",
                 "フックキーワード": keywords_summary,
                 "_raw_details": res.get('details', []),
@@ -217,7 +209,7 @@ if submit_button:
         st.session_state["batch_results"] = batch_results
 
 # ==========================================
-# 6. 一覧表示 ＆ CSVダウンロード
+# 6. 一覧表示 ＆ CSVダウンロード ＆ コピー機能
 # ==========================================
 if "batch_results" in st.session_state and st.session_state["batch_results"]:
     results = st.session_state["batch_results"]
@@ -225,9 +217,17 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
     st.divider()
     st.subheader("📊 検索・分析結果一覧")
 
-    # テーブル用データフレームの作成（内部保持データは除外）
-    df_display = pd.DataFrame(results)[["会社名", "判定", "公式サイト", "判定理由", "確認された拠点", "フックキーワード"]]
+    df_display = pd.DataFrame(results)[["会社名", "判定", "公式サイト", "确认された拠点" if "确认された拠点" in pd.DataFrame(results).columns else "確認された拠点", "フックキーワード"]]
+    # カラム名調整
+    df_display.columns = ["会社名", "判定", "公式サイト", "確認された拠点", "フックキーワード"]
+    
     st.dataframe(df_display, use_container_width=True)
+
+    # 一括コピー用テキストエリア（Gemini風のコピーがしやすいようにTSVまたはテキスト形式で表示）
+    tsv_text = df_display.to_csv(sep="\t", index=False)
+    with st.expander("📋 スプレッドシート用の一括コピー（タブ区切りテキスト）"):
+        st.markdown("下の枠内のテキストをコピーして、スプレッドシートにそのまま貼り付けることができます。")
+        st.code(tsv_text, language="text")
 
     # CSVダウンロードボタン
     csv_data = df_display.to_csv(index=False).encode('utf-8-sig')
@@ -246,8 +246,6 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
         with st.expander(f"{r['会社名']} ── 【 {r['判定']} 】"):
             if r['公式サイト'] != "なし":
                 st.markdown(f"**🌐 公式サイト:** [{r['公式サイト']}]({r['公式サイト']})")
-            
-            st.write(f"**判定理由:** {r['判定理由']}")
             
             if r['_raw_keywords']:
                 st.markdown("**🔑 フックキーワード:**")
