@@ -2,16 +2,24 @@ import streamlit as st
 import json
 import os
 import re
-import requests
 import pandas as pd
-from bs4 import BeautifulSoup
+from tavily import TavilyClient
 from google import genai
 from google.genai import types
 
-st.set_page_config(page_title="九州拠点一括検索ツール", page_icon="✨", layout="wide")
+st.set_page_config(page_title="九州拠点一括検索ツール (Tavily API版)", page_icon="✨", layout="wide")
 
-st.title("✨ 九州拠点一括検索・フックキーワード提案ツール")
-st.markdown("スプレッドシートなどから会社名をコピーし、下のテキストエリアに貼り付けて一括検索してください。")
+st.title("✨ 九州拠点一括検索・フックキーワード提案ツール (Tavily API版)")
+st.markdown("AI特化型検索API「Tavily」を使用した、最も安定かつスムーズな完全版です。")
+
+# ==========================================
+# サイドバー：API設定
+# ==========================================
+with st.sidebar:
+    st.subheader("⚙️ API設定")
+    tavily_api_key = st.text_input("Tavily API Key", type="password", value=os.getenv("TAVILY_API_KEY", ""))
+    st.markdown("---")
+    st.markdown("💡 **Tavily無料枠について**\n- 月1,000回まで無料（クレカ不要）\n- [Tavily公式サイト](https://app.tavily.com/)で即時発行可能")
 
 # ==========================================
 # 0. セッションステート初期化
@@ -22,36 +30,29 @@ if "result_cache" not in st.session_state:
     st.session_state.result_cache = {}
 
 # ==========================================
-# 1. 検索エンジンの実行関数
+# 1. Tavily API 実行関数
 # ==========================================
-def fetch_ddg_results(query: str):
-    clean_kw = query.strip().replace('`', '')
-    url = "https://lite.duckduckgo.com/lite/"
-    data = {'q': clean_kw}
-    headers = {"User-Agent": "Mozilla/5.0"}
-
+def fetch_tavily_results(query: str, api_key: str):
     try:
-        res = requests.post(url, data=data, headers=headers, timeout=3)
-        soup = BeautifulSoup(res.text, "html.parser")
+        client = TavilyClient(api_key=api_key)
+        # 1社の検索につき、関連性の高い上位5〜10件を取得
+        response = client.search(
+            query=query.strip().replace('`', ''),
+            search_depth="basic",
+            max_results=5
+        )
         results = []
-        rows = soup.find_all("tr")
-        current_title = ""; current_url = ""
-        for row in rows:
-            link_tag = row.find("a", class_="result-link")
-            if link_tag:
-                current_title = link_tag.text.strip(); current_url = link_tag["href"]
-            snippet_tag = row.find("td", class_="result-snippet")
-            if snippet_tag:
-                current_snippet = snippet_tag.text.strip()
-                if current_title and current_url:
-                    results.append({'title': current_title, 'url': current_url, 'snippet': current_snippet})
-                    current_title = ""; current_url = ""
+        for item in response.get('results', []):
+            results.append({
+                'title': item.get('title', ''),
+                'url': item.get('url', ''),
+                'snippet': item.get('content', '')
+            })
         return results
-    except:
+    except Exception as e:
         return []
 
-def search_multi_queries(keyword: str):
-    # 検索を2回に削減（公式サイト系 ＋ 九州拠点系）
+def search_multi_queries(keyword: str, api_key: str):
     q1 = f'"{keyword}" 会社概要 公式サイト'
     q2 = f'"{keyword}" 九州 福岡 支店 営業所'
     
@@ -60,7 +61,7 @@ def search_multi_queries(keyword: str):
     seen_urls = set()
     
     for q in queries:
-        res_list = fetch_ddg_results(q)
+        res_list = fetch_tavily_results(q, api_key)
         for r in res_list:
             if r['url'] not in seen_urls:
                 seen_urls.add(r['url'])
@@ -69,7 +70,7 @@ def search_multi_queries(keyword: str):
     if not all_results:
         return "", []
         
-    context = "\n".join([f"- タイトル: {r['title']}\n  内容: {r['snippet']}\n  URL: {r['url']}" for r in all_results[:25]])
+    context = "\n".join([f"- タイトル: {r['title']}\n  内容: {r['snippet']}\n  URL: {r['url']}" for r in all_results[:15]])
     return context, all_results
 
 # ==========================================
@@ -147,6 +148,8 @@ with st.form(key="batch_search_form"):
 if submit_button:
     if not raw_input.strip():
         st.warning("会社名を入力してください。")
+    elif not tavily_api_key:
+        st.error("⚠️ サイドバーに「Tavily API Key」を入力してください。")
     else:
         lines = raw_input.strip().split("\n")
         company_list = []
@@ -156,9 +159,9 @@ if submit_button:
             if comp and comp not in company_list:
                 company_list.append(comp)
 
-        gemini_key = os.getenv("GEMINI_API_KEY")
+        gemini_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
         if not gemini_key:
-            st.error("⚠️ サーバーのVariablesにAPIキー（GEMINI_API_KEY）が設定されていません。")
+            st.error("⚠️ サーバーのVariablesにGemini APIキー（GEMINI_API_KEY）が設定されていません。")
             st.stop()
 
         batch_results = []
@@ -174,10 +177,10 @@ if submit_button:
             else:
                 to_fetch.append(comp)
 
-        status_text.text("🌐 Web検索を実行中...")
+        status_text.text("🌐 Tavily AIで高速検索を実行中...")
         fetched_data = []
         for i, comp in enumerate(to_fetch):
-            context, raw_results = search_multi_queries(comp)
+            context, raw_results = search_multi_queries(comp, tavily_api_key)
             fetched_data.append({
                 "company": comp,
                 "context": context,
