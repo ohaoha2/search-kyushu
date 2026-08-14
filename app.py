@@ -31,7 +31,7 @@ def expand_query_with_ai(keyword: str, gemini_key):
     この企業の【全国の拠点・事業所・店舗一覧、または会社概要】を正しくヒットさせるための、最適なWeb検索クエリを作成してください。
     
     条件:
-    1. 【地域名の強制排除】「九州」や「福岡」といった地域名を検索ワードに絶対に含めないでください。（本来の企業が検索結果から消え、無関係な九州の同名企業がヒットしてしまう原因になるため）。
+    1. 【地域名の強制排除】「九州」や「福岡」といった地域名を検索ワードに絶対に含めないでください。
     2. 【前株・後株の厳守】ユーザーが「〇〇株式会社」などと入力した場合、絶対にその表記を崩さず、ダブルクォーテーションで囲んで完全一致検索（例：'"さわやか株式会社"'）にしてください。
     3. キーワードの後半には、「拠点」「事業所」「支店」「店舗」「会社概要」などの一般的な言葉を付与してください。
     
@@ -51,10 +51,43 @@ def expand_query_with_ai(keyword: str, gemini_key):
         return f'"{keyword}" 会社概要 拠点'
 
 # ==========================================
-# 2. DuckDuckGo Lite による検索関数
+# 2. 【新規】前株・後株の物理フィルタリング関数
 # ==========================================
-def search_ddg_lite(expanded_query: str):
-    # 【修正】完全一致検索の " "（ダブルクォーテーション）を消さないように変更！
+def filter_strict_corporate_type(query: str, results: list):
+    """
+    検索エンジンが勝手に前株・後株を混ぜてきた場合、
+    Python側で物理的に「逆転している検索結果」を削除する関数
+    """
+    if not ("株式会社" in query or "有限会社" in query or "合同会社" in query):
+        return results # 法人格の指定がない場合はそのままスルー
+        
+    filtered = []
+    for r in results:
+        text = r['title'] + " " + r['snippet']
+        
+        # ユーザーが「後株（〇〇株式会社）」で検索した場合
+        if query.endswith("株式会社"):
+            core_name = query.replace("株式会社", "").strip()
+            bad_pattern = f"株式会社{core_name}" # 前株のパターン
+            # テキストに「株式会社さわやか」が含まれていて、かつ「さわやか株式会社」が含まれていないなら除外（ゴミ箱行き）
+            if bad_pattern in text and query not in text:
+                continue
+                
+        # ユーザーが「前株（株式会社〇〇）」で検索した場合
+        elif query.startswith("株式会社"):
+            core_name = query.replace("株式会社", "").strip()
+            bad_pattern = f"{core_name}株式会社" # 後株のパターン
+            if bad_pattern in text and query not in text:
+                continue
+                
+        filtered.append(r)
+        
+    return filtered
+
+# ==========================================
+# 3. DuckDuckGo Lite による検索関数
+# ==========================================
+def search_ddg_lite(original_query: str, expanded_query: str):
     clean_kw = expanded_query.strip().replace('`', '')
     
     url = "https://lite.duckduckgo.com/lite/"
@@ -93,14 +126,20 @@ def search_ddg_lite(expanded_query: str):
         if not results:
             return None, "検索結果を取得できませんでした。"
             
-        context = "\n".join([f"- タイトル: {r['title']}\n  内容: {r['snippet']}\n  URL: {r['url']}" for r in results[:6]])
+        # ★ここでPythonによる物理フィルターを発動し、前株・後株違いを消し去る★
+        filtered_results = filter_strict_corporate_type(original_query, results)
+        
+        if not filtered_results:
+            return "【システム通知】入力された前株・後株に完全一致する企業の検索結果が見つかりませんでした。", None
+            
+        context = "\n".join([f"- タイトル: {r['title']}\n  内容: {r['snippet']}\n  URL: {r['url']}" for r in filtered_results[:6]])
         return context, None
 
     except Exception as e:
         return None, f"検索エラー: {str(e)}"
 
 # ==========================================
-# 3. JSONパースの安全装置付き・分析関数
+# 4. JSONパースの安全装置付き・分析関数
 # ==========================================
 def safe_parse_json(text):
     try:
@@ -124,13 +163,11 @@ def analyze_company_with_ai(query, web_context, gemini_key):
     {web_context}
 
     指示:
-    1. 【最重要・同名異法人の厳禁】文字面が一部一致するだけの「全く無関係な同名企業・別法人」を対象に含めては絶対にいけません。
-    2. 【前株・後株の厳格な一致】ユーザーの入力が「〇〇株式会社（後株）」や「株式会社〇〇（前株）」のように法人格の位置を明記している場合、法人格の位置や名称が異なる企業は、完全に別法人とみなして絶対に弾いてください（is_found: false）。
-    3. 【グループ会社の許可】ただし、対象企業の正規のグループ会社・子会社の拠点は「その企業の拠点（is_found: true）」として扱ってください。
-    4. 取得した公式情報（検索結果）をもとに、その企業（または正規グループ会社）が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に実在の直営拠点（支店、営業所、工場など）を持っているか調査してください。検索結果に九州の記載がない場合は「存在しない（is_found: false）」としてください。
-    5. すでに閉業、閉鎖、廃止、移転完了している拠点は「存在しない（is_found: false）」と判定してください。
-    6. "reasoning" には、検索結果や他社との比較に関するメタな解説やツッコミは含めず、九州拠点の有無や閉業に関する事実のみを1〜2文でシンプルに述べてください。
-    7. この企業へのDX営業代行アプローチで、相手が食いつきそうなフックキーワード（10個）を "sales_keywords" の配列として抽出してください。
+    1. もし【取得したWeb検索結果】が「見つかりませんでした」というシステム通知だった場合、即座に "is_found": false とし、「指定された法人名（前株・後株の完全一致）の企業情報が確認できませんでした」と回答してください。
+    2. 【最重要・同名異法人の厳禁】文字面が一部一致するだけの別法人（例：「さわやか株式会社」に対する「株式会社さわやか倶楽部」など）は完全に別法人とみなして絶対に弾いてください。
+    3. 取得した公式情報（検索結果）をもとに、その企業（または正規グループ会社）が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に実在の直営拠点を持っているか調査してください。検索結果に九州の記載がない場合は「存在しない（is_found: false）」としてください。
+    4. "reasoning" には、九州拠点の有無や閉業に関する事実のみを1〜2文でシンプルに述べてください。
+    5. この企業へのDX営業アプローチで、相手が食いつきそうなフックキーワードを "sales_keywords" に10個抽出してください。
 
     必ず以下のJSONフォーマットのみで回答してください：
     {{
@@ -154,7 +191,7 @@ def analyze_company_with_ai(query, web_context, gemini_key):
     return safe_parse_json(response.text.strip())
 
 # ==========================================
-# 4. Streamlit UI 構築
+# 5. Streamlit UI 構築
 # ==========================================
 
 default_query = ""
@@ -174,7 +211,6 @@ if submit_button:
     if not query:
         st.warning("会社名、住所等を入力してください。")
     else:
-        # 履歴更新
         if query in st.session_state.search_history:
             st.session_state.search_history.remove(query)
         st.session_state.search_history.insert(0, query)
@@ -193,9 +229,10 @@ if submit_button:
                 st.error("⚠️ サーバーのVariablesにAPIキー（GEMINI_API_KEY）が設定されていません。")
                 st.stop()
 
-            with st.spinner(f"「{query}」の会社概要を検索中..."):
+            with st.spinner(f"「{query}」の会社情報を検索中..."):
                 expanded_query = expand_query_with_ai(query, gemini_key)
-                web_context, err = search_ddg_lite(expanded_query)
+                # ★修正: フィルター用に元の入力キーワード(query)も関数に渡す
+                web_context, err = search_ddg_lite(query, expanded_query)
                 
                 if err:
                     st.error(err)
@@ -204,7 +241,6 @@ if submit_button:
             with st.spinner("分析中..."):
                 try:
                     result = analyze_company_with_ai(query, web_context, gemini_key)
-                    # キャッシュ保存
                     st.session_state.result_cache[query] = {
                         "web_context": web_context,
                         "expanded_query": expanded_query,
