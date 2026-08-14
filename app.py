@@ -41,7 +41,7 @@ def fetch_tavily_results(
         search_kwargs = {
             "query": query.strip().replace("`", ""),
             "search_depth": "basic",
-            "max_results": 5
+            "max_results": 20
         }
 
         if include_domains:
@@ -175,7 +175,7 @@ def search_multi_queries(keyword: str, api_key: str):
             f"- タイトル: {r['title']}\n"
             f"  内容: {r['snippet']}\n"
             f"  URL: {r['url']}"
-            for r in all_results[:15]
+            for r in all_results[:20]
         ]
     )
 
