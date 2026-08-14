@@ -12,117 +12,99 @@ st.set_page_config(page_title="九州拠点検索", page_icon="✨")
 st.title("九州拠点検索・フックキーワード提案ツール")
 
 # ==========================================
-# 0. セッションステート（履歴 ＆ キャッシュ）の初期化
+# 0. セッションステート初期化
 # ==========================================
 if "search_history" not in st.session_state:
     st.session_state.search_history = []
-
 if "result_cache" not in st.session_state:
     st.session_state.result_cache = {}
 
 # ==========================================
-# 1. キーワードの自動補正（検索クエリの最適化）
+# 1. 検索エンジンの実行関数（1回分）
 # ==========================================
-def expand_query_with_ai(keyword: str, gemini_key):
-    client = genai.Client(api_key=gemini_key)
-    prompt = f"""
-    ユーザーが入力したキーワード: "{keyword}"
-    
-    この企業の【全国の拠点、事業所、支店、営業所、または会社概要】を確実に見つけるための検索クエリを作成してください。
-    
-    条件:
-    1. 入力されたキーワードをそのままダブルクォーテーションで囲んで含めること。
-    2. 「拠点」「支店」「営業所」「会社概要」などのワードを付与すること。
-    
-    検索クエリの文字列（1行）のみを出力してください。
-    """
-    try:
-        response = client.models.generate_content(
-            model='gemini-3.5-flash-lite',
-            contents=prompt,
-        )
-        return response.text.strip().replace('`', '')
-    except:
-        return f'"{keyword}" 会社概要 拠点 支店 営業所'
-
-# ==========================================
-# 2. DuckDuckGo Lite による検索関数（安定版）
-# ==========================================
-def search_ddg_lite(expanded_query: str):
-    clean_kw = expanded_query.strip().replace('`', '')
-    
+def fetch_ddg_results(query: str):
+    clean_kw = query.strip().replace('`', '')
     url = "https://lite.duckduckgo.com/lite/"
     data = {'q': clean_kw}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
         res = requests.post(url, data=data, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, "html.parser")
-        
         results = []
         rows = soup.find_all("tr")
-        current_title = ""
-        current_url = ""
-        
+        current_title = ""; current_url = ""
         for row in rows:
             link_tag = row.find("a", class_="result-link")
             if link_tag:
-                current_title = link_tag.text.strip()
-                current_url = link_tag["href"]
-            
+                current_title = link_tag.text.strip(); current_url = link_tag["href"]
             snippet_tag = row.find("td", class_="result-snippet")
             if snippet_tag:
                 current_snippet = snippet_tag.text.strip()
                 if current_title and current_url:
-                    results.append({
-                        'title': current_title,
-                        'url': current_url,
-                        'snippet': current_snippet
-                    })
-                    current_title = ""
-                    current_url = ""
-
-        if not results:
-            return None, "検索結果を取得できませんでした。"
-            
-        context = "\n".join([f"- タイトル: {r['title']}\n  内容: {r['snippet']}\n  URL: {r['url']}" for r in results[:10]])
-        return context, None
-
-    except Exception as e:
-        return None, f"検索エラー: {str(e)}"
+                    results.append({'title': current_title, 'url': current_url, 'snippet': current_snippet})
+                    current_title = ""; current_url = ""
+        return results
+    except:
+        return []
 
 # ==========================================
-# 3. JSONパースの安全装置付き・分析関数
+# 2. マルチクエリによる網羅的検索（検索件数大幅増量）
+# ==========================================
+def search_multi_queries(keyword: str):
+    # ① 全国の会社概要・拠点一覧を狙うクエリ
+    q1 = f'"{keyword}" 会社概要 拠点 支店 一覧'
+    # ② 九州・福岡の拠点・営業所をピンポイントで狙うクエリ（法人名完全一致なので別会社は拾いません）
+    q2 = f'"{keyword}" 九州 福岡 支店 営業所'
+    
+    queries = [q1, q2]
+    all_results = []
+    seen_urls = set()
+    
+    for q in queries:
+        res_list = fetch_ddg_results(q)
+        for r in res_list:
+            if r['url'] not in seen_urls:
+                seen_urls.add(r['url'])
+                all_results.append(r)
+                
+    if not all_results:
+        return None, "検索結果を取得できませんでした。", queries
+        
+    # 最大25件まで結合してコンテキストを作成
+    context = "\n".join([f"- タイトル: {r['title']}\n  内容: {r['snippet']}\n  URL: {r['url']}" for r in all_results[:25]])
+    return context, None, queries
+
+# ==========================================
+# 3. JSONパース安全装置
 # ==========================================
 def safe_parse_json(text):
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        text = re.sub(r"```json", "", text)
-        text = re.sub(r"```", "", text).strip()
+        text = re.sub(r"```json|```", "", text).strip()
         match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
+        if match: return json.loads(match.group(0))
         raise
 
+# ==========================================
+# 4. 分析関数
+# ==========================================
 def analyze_company_with_ai(query, web_context, gemini_key):
     client = genai.Client(api_key=gemini_key)
-    
     prompt = f"""
     あなたは企業の所在調査のプロフェッショナルです。
-    ユーザーが入力した企業名: "{query}"
+    ユーザーが入力した正確な企業名: "{query}"
 
-    【取得したWeb検索結果】
+    【取得した大量のWeb検索結果（最大25件）】
     {web_context}
 
     指示:
     1. 検索結果から対象企業の「公式HP」のURLを特定し、"official_url" に格納（見つからない場合は null）。
-    2. 入力された企業が九州地方（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に支店、営業所、工場、グループ拠点等を有しているかを調査してください。少しでも九州における拠点や事業展開が確認できる場合は、必ず "is_found": true としてください。
-    3. "reasoning" には、過不足なく簡潔な判定理由を記載してください。
+    2. 入力された企業が九州地方（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に支店、営業所、工場、グループ拠点等の直営拠点を持っているかを徹底的に調査してください。少しでも九州における拠点や事業展開（福岡支店など）が確認できる場合は、必ず "is_found": true としてください。
+    3. "reasoning" には、確認できた九州の拠点名（例: 福岡支店など）を含めて簡潔な判定理由を記載してください。
     4. 営業アプローチで有効なフックキーワードを "sales_keywords" に10個抽出してください。
-    5. 拠点ごとの詳細情報（名前、住所、詳細URL）を "details" リストにまとめてください。
+    5. 九州内の拠点ごとの詳細情報（名称、住所、詳細URL）を "details" リストに具体的にまとめてください。
 
     必ず以下のJSONフォーマットのみで回答してください：
     {{
@@ -135,21 +117,16 @@ def analyze_company_with_ai(query, web_context, gemini_key):
         "sales_keywords": ["キーワード1", "キーワード2", "キーワード3", "キーワード4", "キーワード5", "キーワード6", "キーワード7", "キーワード8", "キーワード9", "キーワード10"]
     }}
     """
-    
     response = client.models.generate_content(
         model='gemini-3.5-flash-lite',
         contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json"
-        ),
+        config=types.GenerateContentConfig(response_mime_type="application/json"),
     )
-    
     return safe_parse_json(response.text.strip())
 
 # ==========================================
-# 4. Streamlit UI 構築
+# 5. Streamlit UI 構築
 # ==========================================
-
 default_query = ""
 if st.session_state.search_history:
     selected_history = st.selectbox(
@@ -174,10 +151,10 @@ if submit_button:
             st.session_state.search_history.pop()
 
         if query in st.session_state.result_cache:
-            st.info("⚡ キャッシュ（保存されたデータ）から高速表示しています（API消費ゼロ）")
+            st.info("⚡ キャッシュから高速表示しています（API消費ゼロ）")
             cached_data = st.session_state.result_cache[query]
             web_context = cached_data["web_context"]
-            expanded_query = cached_data.get("expanded_query", "不明")
+            used_queries = cached_data.get("used_queries", [])
             result = cached_data["result"]
         else:
             gemini_key = os.getenv("GEMINI_API_KEY")
@@ -185,9 +162,8 @@ if submit_button:
                 st.error("⚠️ サーバーのVariablesにAPIキー（GEMINI_API_KEY）が設定されていません。")
                 st.stop()
 
-            with st.spinner(f"「{query}」の情報を検索中..."):
-                expanded_query = expand_query_with_ai(query, gemini_key)
-                web_context, err = search_ddg_lite(expanded_query)
+            with st.spinner(f"「{query}」の情報を複数クエリで大量検索中..."):
+                web_context, err, used_queries = search_multi_queries(query)
                 
                 if err:
                     st.error(err)
@@ -198,23 +174,19 @@ if submit_button:
                     result = analyze_company_with_ai(query, web_context, gemini_key)
                     st.session_state.result_cache[query] = {
                         "web_context": web_context,
-                        "expanded_query": expanded_query,
+                        "used_queries": used_queries,
                         "result": result
                     }
                 except Exception as e:
                     st.error(f"分析エラーが発生しました: {e}")
                     st.stop()
 
-        # ==========================================
-        # 結果の描画（UI・公式HP・詳細情報）
-        # ==========================================
-        with st.expander("🔍 取得したWeb検索の生データ (デバッグ用)"):
-            st.markdown(f"**実際に検索したクエリ:** `{expanded_query}`")
+        with st.expander("🔍 取得したWeb検索の生データ (デバッグ用・マルチクエリ結果)"):
+            st.markdown(f"**実際に実行した検索クエリ:**\n- `{used_queries[0]}`\n- `{used_queries[1]}`")
             st.text(web_context)
         
         st.divider()
         
-        # 公式サイトの表示（常に最上部に綺麗に配置）
         official_url = result.get('official_url')
         if official_url and official_url != "null":
             st.markdown(f"### 🌐 公式サイト\n[{official_url}]({official_url})")
