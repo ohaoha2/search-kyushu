@@ -85,7 +85,7 @@ def safe_parse_json(text):
         raise
 
 # ==========================================
-# 3. 複数社を一括でAI分析する関数（バッチ処理）
+# 3. 複数社を一括でAI分析する関数（バッチ処理・精度強化版）
 # ==========================================
 def analyze_companies_batch(batch_data, gemini_key):
     client = genai.Client(api_key=gemini_key)
@@ -101,22 +101,23 @@ def analyze_companies_batch(batch_data, gemini_key):
 {prompt_targets}
 
 各企業ごとの共通指示:
-1. "company": 入力された企業名をそのまま格納してください。
-2. "official_url": その企業のコーポレートサイトURL（Wikipedia、求人サイト、ニュースサイトは除外。見つからない場合は null）
-3. "is_found": 九州地方（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に現在展開されている確実な直営拠点（支店、営業所、工場、事業所等）があれば true、なければ false。
-   ただし、すでに閉鎖・廃止された古い情報や、単なる「施工実績」「納入実績」「代理店」の記述は除外してください。
+1. "company": 入力された会社名をそのまま格納してください。
+2. "official_url": 公式サイトのコーポレートサイトURL（Wikipedia、求人サイト、ニュースサイトは除外。見つからない場合は null）
+3. "is_found": 九州地方（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に、現在稼働している直営の支店、営業所、工場、事業所が明確に裏付けられる場合のみ true としてください。以下の場合は必ず false にしてください：
+   - 単なる「施工実績」「納入実績」「代理店」「パートナー企業」「別法人のグループ会社」の言及である場合
+   - すでに閉鎖・廃止された拠点である場合
 4. "details": 九州内の確実な直営拠点ごとの詳細情報（名称, 住所, URL）のリスト（見つからない場合は空配列 []）
-5. "sales_keywords": DX代行営業業務において、相手に刺さるフックキーワード10個のリスト
+5. "sales_keywords": 営業アプローチ用のキーワード10個のリスト
 
 必ず以下のJSON配列フォーマットのみで回答してください（マークダウンの ```json や ``` で囲んでも構いません）：
 [
-    {{
-        "company": "企業名",
+    {
+        "company": "会社名",
         "is_found": true,
         "official_url": "https://...",
-        "details": [{{"name": "...", "address": "...", "url": "..."}}],
+        "details": [{"name": "...", "address": "...", "url": "..."}],
         "sales_keywords": ["キーワード1", "キーワード2", ...]
-    }}
+    }
 ]
     """
     try:
@@ -162,7 +163,6 @@ if submit_button:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # キャッシュ未登録の会社をピックアップ、登録済みのものは再利用
         to_fetch = []
         company_map = {}
 
@@ -183,7 +183,6 @@ if submit_button:
             })
             progress_bar.progress((i + 1) / max(len(to_fetch), 1) * 0.5)
 
-        # 10社ずつに分割して一括AI分析（バッチ処理）
         chunk_size = 10
         analyzed_results = []
         
@@ -193,11 +192,9 @@ if submit_button:
                 chunk = fetched_data[i:i+chunk_size]
                 res_list = analyze_companies_batch(chunk, gemini_key)
                 
-                # リスト形式で返ってきた結果をマッピング
                 if isinstance(res_list, list):
                     for r in res_list:
                         comp_name = r.get("company")
-                        # フォールバック処理（公式サイトの補完）
                         if not r.get('official_url') or r.get('official_url') in ["null", ""]:
                             for item in chunk:
                                 if item['company'] == comp_name and item['raw_results']:
@@ -214,7 +211,6 @@ if submit_button:
                 
                 progress_bar.progress(0.5 + ((i + len(chunk)) / len(fetched_data)) * 0.5)
 
-        # 最終的な表示用データの構築
         for comp in company_list:
             res = company_map.get(comp, {
                 "is_found": False,
