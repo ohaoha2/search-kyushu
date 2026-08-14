@@ -9,7 +9,7 @@ from google.genai import types
 
 st.set_page_config(page_title="九州拠点リサーチ", page_icon="✨")
 
-st.title("九州拠点リサーチツール（DDG Lite ＋ gemini-3.5-flash）")
+st.title("九州拠点リサーチツール")
 
 # ==========================================
 # 1. DuckDuckGo Lite による検索関数
@@ -65,8 +65,21 @@ def search_ddg_lite(keyword: str):
         return None, f"検索エラー: {str(e)}"
 
 # ==========================================
-# 2. Gemini 3.5 Flash による分析関数
+# 2. JSONパースの安全装置付き・分析関数
 # ==========================================
+def safe_parse_json(text):
+    """Geminiの出力から確実theにJSON部分だけを抜き出してパースする関数"""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # マークダウンのバッククォートなどが混ざった場合のエスケープ処理
+        text = re.sub(r"```json", "", text)
+        text = re.sub(r"```", "", text).strip()
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        raise
+
 def analyze_company_with_ai(query, web_context, gemini_key):
     client = genai.Client(api_key=gemini_key)
     
@@ -84,7 +97,7 @@ def analyze_company_with_ai(query, web_context, gemini_key):
     4. "reasoning" は、利用者が混乱するような細かい社名の違いのツッコミや別企業である旨の解説は避け、シンプルに九州拠点の有無や状況を1〜2文で簡潔にまとめてください。
     5. この企業へのDX営業代行アプローチで使えそうなキーワードや業界特性（10個）を "sales_keywords" の配列として抽出してください。
 
-    必ず以下のJSONフォーマットのみで回答してください（Markdownのバッククォート ``` は使わず、純粋なJSON文字列だけで出力してください）。
+    必ず以下のJSONフォーマットのみで回答してください（Markdownのバッククォートなどは一切使わず、純粋なJSON文字列だけで出力してください）。
     {{
         "is_found": true,
         "reasoning": "1〜2文の簡潔な判定理由",
@@ -103,14 +116,16 @@ def analyze_company_with_ai(query, web_context, gemini_key):
         ),
     )
     
-    return json.loads(response.text.strip())
+    return safe_parse_json(response.text.strip())
 
 # ==========================================
-# 3. Streamlit UI 構築
+# 3. Streamlit UI 構築（Enterキー対応フォーム）
 # ==========================================
-query = st.text_input("会社名、住所等を入力", placeholder="例: 〇〇株式会社")
+with st.form(key="search_form"):
+    query = st.text_input("会社名、住所等を入力", placeholder="例: 〇〇株式会社")
+    submit_button = st.form_submit_button("検索", type="primary")
 
-if st.button("リサーチを実行", type="primary"):
+if submit_button:
     if not query:
         st.warning("会社名、住所等を入力してください。")
     else:
