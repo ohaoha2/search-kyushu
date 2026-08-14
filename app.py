@@ -7,20 +7,20 @@ from bs4 import BeautifulSoup
 from google import genai
 from google.genai import types
 
-st.set_page_config(page_title="九州拠点・DX営業リサーチ", page_icon="✨")
+st.set_page_config(page_title="九州拠点リサーチ", page_icon="✨")
 
-st.title("✨ 九州拠点・DX営業リサーチツール（DDG Lite ＋ gemini-3.5-flash）")
-st.write("DuckDuckGo Liteで確実なWeb検索を行い、gemini-3.5-flashで高精度に分析します。")
+st.title("九州拠点リサーチツール（DDG Lite ＋ gemini-3.5-flash）")
 
 # ==========================================
 # 1. DuckDuckGo Lite による検索関数
 # ==========================================
 def search_ddg_lite(keyword: str):
-    clean_kw = re.sub(r'[・"（）()]', ' ', keyword)
+    clean_kw = re.sub(r'[・"（）()]', ' ', keyword).strip()
     if clean_kw.replace("-", "").isdigit():
         query = f"{clean_kw} 住所"
     else:
-        query = f"{clean_kw} 九州 福岡 拠点 工場 支社"
+        # ダブルクォーテーションで囲んで類似企業への誤爆を防ぐ
+        query = f'"{clean_kw}" 九州 福岡 拠点 工場 支社'
 
     url = "https://lite.duckduckgo.com/lite/"
     data = {'q': query}
@@ -58,7 +58,6 @@ def search_ddg_lite(keyword: str):
         if not results:
             return None, "検索結果を取得できませんでした。"
             
-        # コンテキスト文字列を作成
         context = "\n".join([f"- タイトル: {r['title']}\n  内容: {r['snippet']}\n  URL: {r['url']}" for r in results[:5]])
         return context, None
 
@@ -79,14 +78,13 @@ def analyze_company_with_ai(query, web_context, gemini_key):
     {web_context}
 
     指示:
-指示:
-    1. 1. 入力された検索ターゲット（"{query}"）と一致する正式な企業を対象としてください。文字が部分的に似ているだけの「まったく別の企業・別法人」とは絶対に混同しないでください。
+    1. 入力された検索ターゲット（"{query}"）と一致する正式な企業を対象としてください。文字が部分的に似ているだけの「まったく別の企業・別法人」とは絶対に混同しないでください。
     2. その企業が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に実在の直営拠点（支店、営業所、工場など）を持っているか調査してください。
     3. 確証がある場合は "is_found": true とし、企業名・拠点名、正確な住所や地域、URLを抽出してください。
     4. "reasoning" は、利用者が混乱するような細かい社名の違いのツッコミや別企業である旨の解説は避け、シンプルに九州拠点の有無や状況を1〜2文で簡潔にまとめてください。
     5. この企業へのDX営業代行アプローチで使えそうなキーワードや業界特性（10個）を "sales_keywords" の配列として抽出してください。
 
-    必ず以下のJSONフォーマットのみで回答してください（Markdownのバッククォート ``` は使ず、純粋なJSON文字列だけで出力してください）。
+    必ず以下のJSONフォーマットのみで回答してください（Markdownのバッククォート ``` は使わず、純粋なJSON文字列だけで出力してください）。
     {{
         "is_found": true,
         "reasoning": "1〜2文の簡潔な判定理由",
@@ -110,11 +108,11 @@ def analyze_company_with_ai(query, web_context, gemini_key):
 # ==========================================
 # 3. Streamlit UI 構築
 # ==========================================
-query = st.text_input("会社名、または電話番号を入力", placeholder="例: ニデック、株式会社ティーエフケー")
+query = st.text_input("会社名、住所等を入力", placeholder="例: 〇〇株式会社")
 
 if st.button("リサーチを実行", type="primary"):
     if not query:
-        st.warning("会社名または電話番号を入力してください。")
+        st.warning("会社名、住所等を入力してください。")
     else:
         gemini_key = os.getenv("GEMINI_API_KEY")
         
@@ -122,7 +120,7 @@ if st.button("リサーチを実行", type="primary"):
             st.error("⚠️ サーバーのVariablesにAPIキー（GEMINI_API_KEY）が設定されていません。")
             st.stop()
 
-        with st.spinner(f"「{query}」をDuckDuckGo Liteで調査中..."):
+        with st.spinner(f"「{query}」を検索中..."):
             web_context, err = search_ddg_lite(query)
             
             if err:
@@ -131,13 +129,13 @@ if st.button("リサーチを実行", type="primary"):
                 with st.expander("🔍 取得したWeb検索の生データ"):
                     st.text(web_context)
                 
-                with st.spinner("gemini-3.5-flashで分析中..."):
+                with st.spinner("分析中..."):
                     try:
                         result = analyze_company_with_ai(query, web_context, gemini_key)
                         
                         st.divider()
                         if result.get('is_found'):
-                            st.success(f"⭕ 該当する企業・拠点が確認されました！")
+                            st.success(f"⭕ 九州拠点が確認されました。")
                             st.info(f"**判定理由:** {result.get('reasoning')}")
                             
                             keywords = result.get('sales_keywords', [])
@@ -153,7 +151,7 @@ if st.button("リサーチを実行", type="primary"):
                                     st.write(f"住所: {d.get('address')}")
                                     st.markdown(f"[詳細リンク]({d.get('url')})")
                         else:
-                            st.error(f"❌ 確実な九州拠点は確認されませんでした。")
+                            st.error(f"❌ 九州拠点は確認されませんでした。")
                             st.write(f"**判定理由:** {result.get('reasoning')}")
                             
                             keywords = result.get('sales_keywords', [])
