@@ -8,6 +8,10 @@ from tavily import TavilyClient
 from google import genai
 from google.genai import types
 
+
+# =========================================================
+# Streamlit
+# =========================================================
 st.set_page_config(
     page_title="企業情報一括検索ツール",
     layout="wide"
@@ -16,9 +20,9 @@ st.set_page_config(
 st.title("企業情報一括検索ツール")
 
 
-# ==========================================
+# =========================================================
 # APIキー
-# ==========================================
+# =========================================================
 tavily_api_key = (
     os.getenv("TAVILY_API_KEY")
     or st.secrets.get("TAVILY_API_KEY", "")
@@ -30,10 +34,10 @@ gemini_key = (
 )
 
 
-# ==========================================
-# 九州都道府県
-# ==========================================
-KYUSHU_PREFECTURES = [
+# =========================================================
+# 九州
+# =========================================================
+kyushu_prefectures = [
     "福岡",
     "佐賀",
     "長崎",
@@ -44,12 +48,13 @@ KYUSHU_PREFECTURES = [
 ]
 
 
-# ==========================================
+# =========================================================
 # 明らかな第三者サイト
-# ==========================================
-EXCLUDED_DOMAINS = [
+# =========================================================
+excluded_domains = [
     "wikipedia.org",
     "yahoo.co.jp",
+    "nikkei.com",
     "baseconnect.in",
     "metoree.com",
     "alarmbox.jp",
@@ -62,14 +67,16 @@ EXCLUDED_DOMAINS = [
     "instagram.com",
     "facebook.com",
     "linkedin.com",
-    "x.com"
+    "x.com",
+    "shukatsu-line.pref.toyama.lg.jp",
+    "koyou.pref.shizuoka.jp"
 ]
 
 
-# ==========================================
+# =========================================================
 # URL → ドメイン
-# ==========================================
-def extract_domain(url: str):
+# =========================================================
+def extract_domain(url):
 
     try:
         parsed = urlparse(url)
@@ -88,10 +95,10 @@ def extract_domain(url: str):
         return None
 
 
-# ==========================================
-# 第三者ドメイン判定
-# ==========================================
-def is_excluded_domain(domain: str):
+# =========================================================
+# 第三者ドメイン
+# =========================================================
+def is_excluded_domain(domain):
 
     if not domain:
         return True
@@ -99,16 +106,16 @@ def is_excluded_domain(domain: str):
     return any(
         domain == excluded
         or domain.endswith("." + excluded)
-        for excluded in EXCLUDED_DOMAINS
+        for excluded in excluded_domains
     )
 
 
-# ==========================================
-# Tavily検索
-# ==========================================
+# =========================================================
+# Tavily
+# =========================================================
 def fetch_tavily_results(
-    query: str,
-    api_key: str,
+    query,
+    api_key,
     include_domains=None
 ):
 
@@ -118,27 +125,39 @@ def fetch_tavily_results(
             api_key=api_key
         )
 
-        kwargs = {
+        params = {
             "query": query.strip().replace("`", ""),
             "search_depth": "basic",
             "max_results": 5
         }
 
         if include_domains:
-            kwargs["include_domains"] = include_domains
+            params["include_domains"] = include_domains
 
         response = client.search(
-            **kwargs
+            **params
         )
 
         results = []
 
-        for item in response.get("results", []):
+        for item in response.get(
+            "results",
+            []
+        ):
 
             results.append({
-                "title": item.get("title", ""),
-                "url": item.get("url", ""),
-                "snippet": item.get("content", "")
+                "title": item.get(
+                    "title",
+                    ""
+                ),
+                "url": item.get(
+                    "url",
+                    ""
+                ),
+                "snippet": item.get(
+                    "content",
+                    ""
+                )
             })
 
         return results
@@ -147,139 +166,175 @@ def fetch_tavily_results(
         return []
 
 
-# ==========================================
-# q1：公式サイト検索
-# ==========================================
+# =========================================================
+# q1：公式サイト取得
+# =========================================================
 def search_official_site(
-    company: str,
-    api_key: str
+    company,
+    api_key
 ):
 
-    q1 = (
+    query = (
         f'"{company}" '
-        f'会社概要 公式 コーポレートサイト'
+        f'会社概要 公式サイト'
     )
 
     results = fetch_tavily_results(
-        q1,
+        query,
         api_key
     )
 
     if not results:
         return None, None, results
 
-    # ------------------------------------------
-    # 公式サイト候補を単純に選ぶ
-    # 「公式URLをGeminiに選ばせない」
-    # ------------------------------------------
-
-    # 第1優先：
-    # タイトル・内容に会社名＋公式系キーワードがある
-    candidates = []
-
-    company_name = company.lower()
+    # ---------------------------------------------
+    # まず「対象会社名がタイトルに入っている」
+    # 公式らしい結果を探す
+    # ---------------------------------------------
+    exact_candidates = []
 
     for result in results:
 
-        url = result.get("url", "")
-        title = result.get("title", "")
-        snippet = result.get("snippet", "")
+        url = result.get(
+            "url",
+            ""
+        )
 
-        domain = extract_domain(url)
+        title = result.get(
+            "title",
+            ""
+        )
+
+        if not url:
+            continue
+
+        domain = extract_domain(
+            url
+        )
 
         if not domain:
             continue
 
-        if is_excluded_domain(domain):
+        if is_excluded_domain(
+            domain
+        ):
             continue
 
-        score = 0
-
-        title_lower = title.lower()
-        snippet_lower = snippet.lower()
-
-        # 会社名一致
-        if company_name in title_lower:
-            score += 30
-
-        if company_name in snippet_lower:
-            score += 10
-
-        # 公式系ページ
-        official_words = [
-            "公式",
-            "会社概要",
-            "会社情報",
-            "企業情報",
-            "コーポレート",
-            "corporate",
-            "company"
-        ]
-
-        for word in official_words:
-
-            if word.lower() in title_lower:
-                score += 10
-
-        # URL自体に会社名の文字列が含まれる
-        company_clean = (
+        # 「株式会社」を外した会社名
+        company_core = (
             company
-            .replace("株式会社", "")
-            .replace("合同会社", "")
-            .replace("有限会社", "")
-            .replace(" ", "")
-            .replace("　", "")
-            .lower()
+            .replace(
+                "株式会社",
+                ""
+            )
+            .replace(
+                "合同会社",
+                ""
+            )
+            .replace(
+                "有限会社",
+                ""
+            )
+            .replace(
+                "　",
+                ""
+            )
+            .replace(
+                " ",
+                ""
+            )
         )
 
-        domain_clean = domain.replace(
-            ".",
+        title_core = (
+            title
+            .replace(
+                "株式会社",
+                ""
+            )
+            .replace(
+                "合同会社",
+                ""
+            )
+            .replace(
+                "有限会社",
+                ""
+            )
+            .replace(
+                "　",
+                ""
+            )
+            .replace(
+                " ",
+                ""
+            )
+        )
+
+        if company_core and company_core in title_core:
+
+            exact_candidates.append(
+                result
+            )
+
+    # ---------------------------------------------
+    # exact候補があれば最初のもの
+    # ---------------------------------------------
+    if exact_candidates:
+
+        selected = exact_candidates[0]
+
+        return (
+            selected.get("url"),
+            extract_domain(
+                selected.get("url")
+            ),
+            results
+        )
+
+    # ---------------------------------------------
+    # なければ第三者を除外して最初の結果
+    # ---------------------------------------------
+    for result in results:
+
+        url = result.get(
+            "url",
             ""
         )
 
-        if (
-            company_clean
-            and company_clean in domain_clean
+        domain = extract_domain(
+            url
+        )
+
+        if not domain:
+            continue
+
+        if is_excluded_domain(
+            domain
         ):
-            score += 20
+            continue
 
-        candidates.append({
-            "score": score,
-            "url": url,
-            "domain": domain
-        })
+        return (
+            url,
+            domain,
+            results
+        )
 
-    if not candidates:
-        return None, None, results
-
-    candidates.sort(
-        key=lambda x: x["score"],
-        reverse=True
-    )
-
-    best = candidates[0]
-
-    return (
-        best["url"],
-        best["domain"],
-        results
-    )
+    return None, None, results
 
 
-# ==========================================
-# q2：取得した公式ドメイン内を検索
-# ==========================================
+# =========================================================
+# q2：公式サイト内検索
+# =========================================================
 def search_official_domain(
-    company: str,
-    official_domain: str,
-    api_key: str
+    company,
+    official_domain,
+    api_key
 ):
 
     query = (
         f'site:{official_domain} '
         f'九州 福岡 佐賀 長崎 熊本 大分 宮崎 鹿児島 '
         f'支店 支社 営業所 事業所 事業部 '
-        f'法人営業 法人事業 営業拠点 拠点 '
+        f'営業部 法人営業 法人事業 拠点 '
         f'リフォーム事業部 Hub'
     )
 
@@ -292,17 +347,14 @@ def search_official_domain(
     )
 
 
-# ==========================================
-# 1社分の検索
-# ==========================================
+# =========================================================
+# 1社検索
+# =========================================================
 def search_company(
-    company: str,
-    api_key: str
+    company,
+    api_key
 ):
 
-    # ------------------------------------------
-    # q1
-    # ------------------------------------------
     official_url, official_domain, q1_results = (
         search_official_site(
             company,
@@ -310,9 +362,6 @@ def search_company(
         )
     )
 
-    # ------------------------------------------
-    # q2
-    # ------------------------------------------
     q2_results = []
 
     if official_domain:
@@ -332,13 +381,16 @@ def search_company(
     }
 
 
-# ==========================================
-# JSON安全パース
-# ==========================================
+# =========================================================
+# JSON
+# =========================================================
 def safe_parse_json(text):
 
     try:
-        return json.loads(text)
+
+        return json.loads(
+            text
+        )
 
     except json.JSONDecodeError:
 
@@ -355,6 +407,7 @@ def safe_parse_json(text):
         )
 
         if match:
+
             return json.loads(
                 match.group(0)
             )
@@ -362,9 +415,9 @@ def safe_parse_json(text):
         raise
 
 
-# ==========================================
-# Gemini：公式検索結果から拠点抽出
-# ==========================================
+# =========================================================
+# Gemini：拠点抽出
+# =========================================================
 def extract_locations(
     batch_data,
     gemini_key
@@ -376,7 +429,9 @@ def extract_locations(
 
     targets = ""
 
-    for i, item in enumerate(batch_data):
+    for i, item in enumerate(
+        batch_data
+    ):
 
         q2_results = item.get(
             "q2_results",
@@ -404,16 +459,16 @@ def extract_locations(
         )
 
     prompt = f"""
-あなたは企業拠点情報の抽出担当です。
+あなたは企業の拠点情報を抽出する担当者です。
 
-以下の検索結果は、対象企業自身の公式ドメイン内を検索した結果です。
+以下は対象企業自身の公式ドメイン内を検索した結果です。
 
-検索結果から、九州内にある対象企業自身の現在の具体的な拠点だけを抽出してください。
+検索結果に実際に記載されている情報だけを使い、
+九州内の対象企業自身の現在の具体的な拠点を抽出してください。
 
-判定そのものはしません。
-推測・補完もしません。
+推測は禁止です。
 
-【対象とする拠点】
+【優先する拠点】
 
 ・本社
 ・支店
@@ -424,13 +479,15 @@ def extract_locations(
 ・営業部
 ・法人営業部
 ・法人事業部
-・営業拠点
 ・リフォーム事業部
+・営業拠点
 ・Hub
-・その他の恒常的な営業・事業拠点
 
-物流センター、配送センター、DC、倉庫も
-対象企業自身の公式サイト上で事業拠点であることが明確なら抽出候補です。
+物流センター、配送センター、DC、倉庫も、
+対象企業自身の公式拠点として明確に確認できる場合は候補。
+
+ただし営業・事業拠点が確認できる場合は、
+そちらを優先してください。
 
 【除外】
 
@@ -440,13 +497,13 @@ def extract_locations(
 ・別法人
 ・代理店
 ・販売店
-・パートナー企業
+・パートナー
 ・協力会社
-・施工現場
 ・顧客先
+・施工現場
 ・納入先
 
-例えば、
+例：
 
 対象企業：
 ニデック株式会社
@@ -454,31 +511,34 @@ def extract_locations(
 検索結果：
 ニデックテクノモータ株式会社 九州事業所
 
-これは別法人なので除外してください。
+→ 別法人なので除外。
 
 【重要】
 
-検索結果に実際に記載されている名称・住所だけを使用してください。
+検索結果にある拠点名をそのまま使ってください。
 
 「九州エリア」
 「九州各県」
-「福岡エリア」
 「九州エリア店舗・事業所」
-などの一般的な表現は拠点として扱わないでください。
+「福岡エリア」
+などの曖昧な表現は拠点として使用しない。
 
-拠点名を勝手に作ってはいけません。
+住所も検索結果に記載されているものだけを使用。
 
-例えば検索結果に、
+例えば、
 
 九州支店
 〒810-0001 福岡市中央区天神1-14-18
 
-とあれば、
+なら、
 
-"name": "九州支店"
-"address": "福岡市中央区天神1-14-18"
+{{
+    "name": "九州支店",
+    "address": "福岡市中央区天神1-14-18",
+    "url": "その公式ページURL"
+}}
 
-と、そのまま記載してください。
+としてください。
 
 JSONのみ返してください。
 
@@ -489,7 +549,7 @@ JSONのみ返してください。
             {{
                 "name": "拠点名",
                 "address": "住所",
-                "url": "公式ページURL"
+                "url": "公式URL"
             }}
         ]
     }}
@@ -519,9 +579,9 @@ JSONのみ返してください。
         return []
 
 
-# ==========================================
+# =========================================================
 # Gemini：キーワード・特記事項
-# ==========================================
+# =========================================================
 def analyze_metadata(
     batch_data,
     gemini_key
@@ -535,7 +595,7 @@ def analyze_metadata(
 
     for item in batch_data:
 
-        q1_text = "\n".join(
+        context = "\n".join(
             [
                 (
                     f"- {r.get('title', '')}\n"
@@ -545,32 +605,27 @@ def analyze_metadata(
                 for r in item.get(
                     "q1_results",
                     []
-                )[:5]
+                )
             ]
         )
 
         targets += (
             f"\n=== {item['company']} ===\n"
-            f"{q1_text}\n"
+            f"{context}\n"
         )
 
     prompt = f"""
 以下の企業について、
 フックキーワード10個と特記事項を作成してください。
 
-拠点判定はしません。
-
 【フックキーワード】
 
-DX営業代行で使える、
-企業の事業内容に関連したキーワードを10個。
-
-単なる「DX」だけではなく、
-その企業固有の事業内容を優先してください。
+企業の実際の事業内容から、
+DX営業代行で使える具体的なキーワードを10個。
 
 【特記事項】
 
-2023年8月14日以降の以下の重要トピックのみ。
+2023年8月14日以降の重要トピックのみ。
 
 ・社名変更
 ・拠点新設
@@ -582,9 +637,9 @@ DX営業代行で使える、
 ・新規事業
 ・大規模設備投資
 
-明確な根拠がない場合は[]。
+明確なものがなければ[]。
 
-JSONのみ返してください。
+JSONのみ。
 
 [
     {{
@@ -618,9 +673,9 @@ JSONのみ返してください。
         return []
 
 
-# ==========================================
+# =========================================================
 # UI
-# ==========================================
+# =========================================================
 with st.form(
     key="batch_search_form"
 ):
@@ -637,12 +692,14 @@ with st.form(
     )
 
 
-# ==========================================
+# =========================================================
 # 実行
-# ==========================================
+# =========================================================
 if submit_button:
 
-    # 古い結果を削除
+    # ---------------------------------------------
+    # キャッシュ・前回結果を使わない
+    # ---------------------------------------------
     st.session_state.pop(
         "batch_results",
         None
@@ -654,10 +711,7 @@ if submit_button:
             "会社名を入力してください。"
         )
 
-    elif (
-        not tavily_api_key
-        or not gemini_key
-    ):
+    elif not tavily_api_key or not gemini_key:
 
         st.error(
             "Streamlitの Secrets に "
@@ -667,6 +721,9 @@ if submit_button:
 
     else:
 
+        # -----------------------------------------
+        # 会社名取得
+        # -----------------------------------------
         lines = raw_input.strip().split(
             "\n"
         )
@@ -675,7 +732,9 @@ if submit_button:
 
         for line in lines:
 
-            parts = line.split("\t")
+            parts = line.split(
+                "\t"
+            )
 
             company = parts[0].strip()
 
@@ -696,9 +755,9 @@ if submit_button:
 
         fetched_data = []
 
-        # ======================================
-        # q1/q2
-        # ======================================
+        # -----------------------------------------
+        # Tavily
+        # -----------------------------------------
         status_text.text(
             "公式サイト検索・公式サイト内検索中..."
         )
@@ -726,11 +785,11 @@ if submit_button:
                 ) * 0.5
             )
 
-        # ======================================
-        # 拠点抽出
-        # ======================================
+        # -----------------------------------------
+        # Gemini：拠点
+        # -----------------------------------------
         status_text.text(
-            "公式サイトから拠点情報を抽出中..."
+            "公式サイトから九州拠点を抽出中..."
         )
 
         detail_map = {}
@@ -760,15 +819,17 @@ if submit_button:
                 for item in extracted:
 
                     detail_map[
-                        item.get("company")
+                        item.get(
+                            "company"
+                        )
                     ] = item.get(
                         "details",
                         []
                     )
 
-        # ======================================
-        # メタデータ
-        # ======================================
+        # -----------------------------------------
+        # Gemini：metadata
+        # -----------------------------------------
         status_text.text(
             "企業情報を整理中..."
         )
@@ -798,13 +859,15 @@ if submit_button:
                 for item in metadata:
 
                     metadata_map[
-                        item.get("company")
+                        item.get(
+                            "company"
+                        )
                     ] = item
 
-        # ======================================
+        # -----------------------------------------
         # 最終結果
-        # ======================================
-        results = []
+        # -----------------------------------------
+        batch_results = []
 
         for company in company_list:
 
@@ -839,9 +902,9 @@ if submit_button:
                 []
             )
 
-            # ----------------------------------
+            # -----------------------------------
             # 拠点
-            # ----------------------------------
+            # -----------------------------------
             raw_details = detail_map.get(
                 company,
                 []
@@ -851,6 +914,7 @@ if submit_button:
                 raw_details,
                 list
             ):
+
                 raw_details = []
 
             valid_details = []
@@ -887,12 +951,14 @@ if submit_button:
                 if not name or not address:
                     continue
 
+                # 九州住所
                 if not any(
                     pref in address
-                    for pref in KYUSHU_PREFECTURES
+                    for pref in kyushu_prefectures
                 ):
                     continue
 
+                # 曖昧な拠点名
                 vague_names = [
                     "九州エリア",
                     "九州各県",
@@ -910,31 +976,16 @@ if submit_button:
                 ):
                     continue
 
-                # 拠点URLが第三者サイトなら除外
-                if url:
-
-                    detail_domain = extract_domain(
-                        url
-                    )
-
-                    if (
-                        detail_domain
-                        and official_domain
-                        and detail_domain != official_domain
-                    ):
-                        continue
-
                 valid_details.append({
                     "name": name,
                     "address": address,
                     "url": url
                 })
 
-            # ----------------------------------
+            # -----------------------------------
             # 重複削除
-            # ----------------------------------
+            # -----------------------------------
             unique_details = []
-
             seen = set()
 
             for d in valid_details:
@@ -956,9 +1007,9 @@ if submit_button:
 
             valid_details = unique_details
 
-            # ----------------------------------
+            # -----------------------------------
             # 判定
-            # ----------------------------------
+            # -----------------------------------
             if not official_domain:
 
                 status = "❓判定不明"
@@ -992,12 +1043,12 @@ if submit_button:
 
                 reason = (
                     "公式サイトは確認できたが、"
-                    "公式サイト内の九州拠点検索結果を取得できない"
+                    "公式サイト内の拠点検索結果を取得できない"
                 )
 
-            # ----------------------------------
-            # キーワード
-            # ----------------------------------
+            # -----------------------------------
+            # metadata
+            # -----------------------------------
             metadata = metadata_map.get(
                 company,
                 {}
@@ -1012,6 +1063,7 @@ if submit_button:
                 keywords,
                 list
             ):
+
                 keywords = []
 
             notes = metadata.get(
@@ -1023,11 +1075,13 @@ if submit_button:
                 notes,
                 list
             ):
+
                 notes = []
 
             details_summary = ", ".join(
                 [
-                    f"{d['name']} ({d['address']})"
+                    f"{d['name']} "
+                    f"({d['address']})"
                     for d in valid_details
                 ]
             )
@@ -1042,7 +1096,7 @@ if submit_button:
                 for x in notes
             )
 
-            results.append({
+            batch_results.append({
                 "会社名": company,
                 "公式サイト": official_url,
                 "判定": status,
@@ -1055,7 +1109,6 @@ if submit_button:
                     keywords_summary,
                 "特記事項":
                     notes_summary,
-
                 "_raw_details":
                     valid_details,
                 "_raw_keywords":
@@ -1085,12 +1138,12 @@ if submit_button:
 
         st.session_state[
             "batch_results"
-        ] = results
+        ] = batch_results
 
 
-# ==========================================
+# =========================================================
 # 結果表示
-# ==========================================
+# =========================================================
 if (
     "batch_results" in st.session_state
     and st.session_state[
@@ -1142,9 +1195,9 @@ if (
         use_container_width=True
     )
 
-    # ======================================
+    # =====================================================
     # TSV
-    # ======================================
+    # =====================================================
     tsv_text = df_display.to_csv(
         sep="\t",
         index=False
@@ -1164,9 +1217,9 @@ if (
             language="text"
         )
 
-    # ======================================
+    # =====================================================
     # CSV
-    # ======================================
+    # =====================================================
     csv_data = df_display.to_csv(
         index=False
     ).encode(
@@ -1181,9 +1234,9 @@ if (
         type="primary"
     )
 
-    # ======================================
+    # =====================================================
     # カード
-    # ======================================
+    # =====================================================
     st.divider()
 
     st.subheader(
@@ -1196,10 +1249,12 @@ if (
             f"{r['会社名']} ── 【 {r['判定']} 】"
         ):
 
-            # ----------------------------------
+            # ---------------------------------------------
             # 公式サイト
-            # ----------------------------------
-            if r.get("公式サイト"):
+            # ---------------------------------------------
+            if r.get(
+                "公式サイト"
+            ):
 
                 st.markdown(
                     f"**公式サイト:** "
@@ -1207,30 +1262,36 @@ if (
                     f"({r['公式サイト']})"
                 )
 
-            # ----------------------------------
+            # ---------------------------------------------
             # 判定根拠
-            # ----------------------------------
-            if r.get("_reason"):
+            # ---------------------------------------------
+            if r.get(
+                "_reason"
+            ):
 
                 st.info(
                     f"**判定根拠:** "
                     f"{r['_reason']}"
                 )
 
-            # ----------------------------------
+            # ---------------------------------------------
             # 特記事項
-            # ----------------------------------
-            if r.get("_raw_notes"):
+            # ---------------------------------------------
+            if r.get(
+                "_raw_notes"
+            ):
 
                 st.info(
                     f"**特記事項:** "
                     f"{r['_raw_notes']}"
                 )
 
-            # ----------------------------------
+            # ---------------------------------------------
             # キーワード
-            # ----------------------------------
-            if r.get("_raw_keywords"):
+            # ---------------------------------------------
+            if r.get(
+                "_raw_keywords"
+            ):
 
                 st.markdown(
                     "**フックキーワード:**"
@@ -1245,10 +1306,12 @@ if (
                     )
                 )
 
-            # ----------------------------------
-            # 拠点
-            # ----------------------------------
-            if r.get("_raw_details"):
+            # ---------------------------------------------
+            # 拠点詳細
+            # ---------------------------------------------
+            if r.get(
+                "_raw_details"
+            ):
 
                 st.markdown(
                     "**拠点詳細:**"
@@ -1271,17 +1334,21 @@ if (
                             f"{d.get('address')}"
                         )
 
-                        if d.get("url"):
+                        if d.get(
+                            "url"
+                        ):
 
                             st.markdown(
                                 f"[詳細リンク]"
                                 f"({d.get('url')})"
                             )
 
-            # ----------------------------------
-            # q1
-            # ----------------------------------
-            if r.get("_q1_results"):
+            # ---------------------------------------------
+            # q1確認
+            # ---------------------------------------------
+            if r.get(
+                "_q1_results"
+            ):
 
                 with st.expander(
                     "公式サイト候補を確認"
@@ -1295,25 +1362,33 @@ if (
                             f"**{result.get('title', '')}**"
                         )
 
-                        if result.get("snippet"):
+                        if result.get(
+                            "snippet"
+                        ):
 
                             st.write(
-                                result["snippet"]
+                                result.get(
+                                    "snippet"
+                                )
                             )
 
-                        if result.get("url"):
+                        if result.get(
+                            "url"
+                        ):
 
                             st.markdown(
                                 f"[URL]"
-                                f"({result['url']})"
+                                f"({result.get('url')})"
                             )
 
                         st.divider()
 
-            # ----------------------------------
-            # q2
-            # ----------------------------------
-            if r.get("_q2_results"):
+            # ---------------------------------------------
+            # q2確認
+            # ---------------------------------------------
+            if r.get(
+                "_q2_results"
+            ):
 
                 with st.expander(
                     "公式サイト内の拠点検索結果を確認"
@@ -1327,17 +1402,23 @@ if (
                             f"**{result.get('title', '')}**"
                         )
 
-                        if result.get("snippet"):
+                        if result.get(
+                            "snippet"
+                        ):
 
                             st.write(
-                                result["snippet"]
+                                result.get(
+                                    "snippet"
+                                )
                             )
 
-                        if result.get("url"):
+                        if result.get(
+                            "url"
+                        ):
 
                             st.markdown(
                                 f"[URL]"
-                                f"({result['url']})"
+                                f"({result.get('url')})"
                             )
 
                         st.divider()
