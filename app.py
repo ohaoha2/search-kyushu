@@ -44,7 +44,7 @@ def extract_domain(url: str):
         return None
 
 # ==========================================
-# 1. 前株・後株構造を考慮した Tavily 検索機能
+# 1. フレーズ検索（ダブルクォーテーション）を徹底した Tavily 検索機能
 # ==========================================
 def fetch_tavily_results(query: str, api_key: str, include_domains=None):
     try:
@@ -59,9 +59,21 @@ def fetch_tavily_results(query: str, api_key: str, include_domains=None):
 def search_company_info(company_name: str, api_key: str):
     clean_name = company_name.strip()
     
-    # 前株・後株の構造をそのまま正確にクエリに反映させる
-    q1_query = f'"{clean_name}" 公式サイト 会社概要 企業情報'
-    q1_results = fetch_tavily_results(q1_query, api_key)
+    # 前株・後株の構造をダブルクォーテーション（フレーズ検索）で厳格に固定し、複数クエリで多角的に収集
+    queries = [
+        f'"{clean_name}" 会社概要 企業情報',
+        f'"{clean_name}" 拠点 支店 一覧',
+        f'"{clean_name}" 公式サイト コーポレート'
+    ]
+    
+    q1_results = []
+    seen_urls = set()
+    for q in queries:
+        res = fetch_tavily_results(q, api_key)
+        for r in res:
+            if r['url'] not in seen_urls:
+                seen_urls.add(r['url'])
+                q1_results.append(r)
     
     official_domain = None
     valid_q1 = []
