@@ -95,7 +95,7 @@ def analyze_company_with_ai(query, web_context, gemini_key):
     2. その企業が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に実在の直営拠点（支店、営業所、工場など）を持っているか調査してください。
     3. 確証がある場合は "is_found": true とし、企業名・拠点名、正確な住所や地域、URLを抽出してください。
     4. "reasoning" は、利用者が混乱するような細かい社名の違いのツッコミや別企業である旨の解説は避け、シンプルに九州拠点の有無や状況を1〜2文で簡潔にまとめてください。
-    5. この企業へのDX営業代行アプローチで使えそうなキーワードや業界特性（10個）を "sales_keywords" の配列として抽出してください。
+    5. この企業へのDX営業代行アプローチで、相手が食いつきそうなフックキーワード（10個）を "sales_keywords" の配列として抽出してください。
 
     必ず以下のJSONフォーマットのみで回答してください（Markdownのバッククォートなどは一切使わず、純粋なJSON文字列だけで出力してください）。
     {{
@@ -171,7 +171,7 @@ if submit_button:
                             
                             keywords = result.get('sales_keywords', [])
                             if keywords:
-                                st.markdown("### 🔑 DX営業アプローチキーワード（参考）")
+                                st.markdown("### 🔑 フックキーワード")
                                 keywords_md = " ".join([f"`{kw}`" for kw in keywords])
                                 st.markdown(keywords_md)
                                 
