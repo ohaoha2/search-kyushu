@@ -101,10 +101,11 @@ def analyze_companies_batch(batch_data, gemini_key):
 各企業ごとの共通指示:
 1. "company": 入力された会社名をそのまま格納してください。
 2. "official_url": 公式サイトのコーポレートサイトURL（Wikipedia、求人サイト、ニュースサイトは除外。見つからない場合は null）
-3. "is_found": 九州地方（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に、現在稼働している直営の支店、営業所、工場、事業所が明確に裏付けられる場合のみ true としてください。以下の場合は必ず false にしてください：
+3. "details": 九州内の確実な直営拠点ごとの詳細情報（名称, 住所, URL）のリスト（見つからない場合は空配列 []）
+4. "is_found": 九州地方（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に、現在稼働している直営の支店、営業所、工場、事業所が明確に裏付けられる場合のみ true としてください。以下の場合は必ず false にしてください：
    - 単なる「施工実績」「納入実績」「代理店」「パートナー企業」「別法人のグループ会社」の言及である場合
    - すでに閉鎖・廃止された拠点である場合
-4. "details": 九州内の確実な直営拠点ごとの詳細情報（名称, 住所, URL）のリスト（見つからない場合は空配列 []）
+   - details が空配列 [] の場合
 5. "sales_keywords": 営業アプローチ用のキーワード10個のリスト
 
 必ず以下のJSON配列フォーマットのみで回答してください：
@@ -215,7 +216,7 @@ if submit_button:
                 "sales_keywords": []
             })
 
-            is_found_str = "⭕ 九州拠点あり" if res.get('is_found') else "❌ 拠点なし"
+            is_found_str = "⭕ 九州拠点あり" if res.get('is_found') else "❌ 九州拠点なし"
             official_url = res.get('official_url')
             if not official_url or official_url in ["null", ""]: 
                 official_url = None
@@ -246,7 +247,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
     st.divider()
     st.subheader("📊 検索・分析結果一覧")
 
-    df_display = pd.DataFrame(results)[["会社名", "判定", "公式サイト", "確認された拠点", "フックキーワード"]]
+    df_display = pd.DataFrame(results)[["会社名", "判定", "公式サイト", "九州拠点", "フックキーワード"]]
     
     st.dataframe(
         df_display,
