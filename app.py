@@ -28,17 +28,16 @@ def expand_query_with_ai(keyword: str, gemini_key):
     prompt = f"""
     ユーザーが入力したキーワード: "{keyword}"
     
-    このキーワードが指す「世間一般で最も有名な正式企業・ブランド」が、【九州地方（福岡など）に支店・営業所・工場などの拠点を持っているか】を調べるための、最適なWeb検索クエリ（スペース区切り）を作成してください。
+    この企業の【全国の拠点・事業所・店舗一覧、または会社概要】を正しくヒットさせるための、最適なWeb検索クエリを作成してください。
     
     条件:
-    1. 【前株・後株の維持】ユーザーが「株式会社〇〇」や「〇〇株式会社」のように法人格を明記している場合、その法人格の表記と位置は絶対に崩さずそのまま残すこと。
-    2. 同名異法人（無関係な別会社）を避けるため、業種や旧社名などの固有名称を適度に含めること。
-    3. 本社がある都道府県名（東京、静岡、京都など）は絶対に入れないこと（九州の拠点がヒットしづらくなるため）。
-    4. 検索ワードの後半に「九州 福岡 拠点 支社 工場」などを付与すること。
+    1. 【地域名の強制排除】「九州」や「福岡」といった地域名を検索ワードに絶対に含めないでください。（本来の企業が検索結果から消え、無関係な九州の同名企業がヒットしてしまう原因になるため）。
+    2. 【前株・後株の厳守】ユーザーが「〇〇株式会社」などと入力した場合、絶対にその表記を崩さず、ダブルクォーテーションで囲んで完全一致検索（例：'"さわやか株式会社"'）にしてください。
+    3. キーワードの後半には、「拠点」「事業所」「支店」「店舗」「会社概要」などの一般的な言葉を付与してください。
     
     例:
-    「さわやか株式会社」→「さわやか株式会社 九州 福岡 拠点 支社」
-    「ニデック」→「ニデック 旧日本電産 九州 拠点 支社 工場」
+    「さわやか株式会社」→ `"さわやか株式会社" 会社概要 拠点 店舗`
+    「ニデック」→ `ニデック 旧日本電産 拠点 支社 会社概要`
     
     余計な挨拶や解説は省き、検索クエリの文字列（1行）のみを出力してください。
     """
@@ -49,13 +48,14 @@ def expand_query_with_ai(keyword: str, gemini_key):
         )
         return response.text.strip()
     except:
-        return f"{keyword} 九州 拠点 支社 工場"
+        return f'"{keyword}" 会社概要 拠点'
 
 # ==========================================
 # 2. DuckDuckGo Lite による検索関数
 # ==========================================
 def search_ddg_lite(expanded_query: str):
-    clean_kw = re.sub(r'["（）()]', ' ', expanded_query).strip()
+    # 【修正】完全一致検索の " "（ダブルクォーテーション）を消さないように変更！
+    clean_kw = expanded_query.strip().replace('`', '')
     
     url = "https://lite.duckduckgo.com/lite/"
     data = {'q': clean_kw}
@@ -120,14 +120,14 @@ def analyze_company_with_ai(query, web_context, gemini_key):
     あなたは企業の所在調査およびDX営業戦略のプロフェッショナルです。
     ユーザーが本来検索したかったターゲット: "{query}"
 
-    【取得したWeb検索結果】
+    【取得したWeb検索結果（公式の会社概要や拠点一覧など）】
     {web_context}
 
     指示:
     1. 【最重要・同名異法人の厳禁】文字面が一部一致するだけの「全く無関係な同名企業・別法人」を対象に含めては絶対にいけません。
-    2. 【前株・後株の厳格な一致】ユーザーの入力が「〇〇株式会社（後株）」や「株式会社〇〇（前株）」のように法人格の位置を明記している場合、法人格の位置や名称が異なる企業（例：「さわやか株式会社」に対して「株式会社さわやか倶楽部」がヒットした場合など）は、完全に別法人とみなして絶対に弾いてください（is_found: false）。
-    3. 【グループ会社の許可】ただし、対象企業の正規のグループ会社・子会社（例：ニデックに対する「ニデックテクノモータ」など）の拠点は、無関係な別法人ではなく「その企業の拠点（is_found: true）」として扱ってください。
-    4. その企業（または正規グループ会社）が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に実在の直営拠点（支店、営業所、工場など）を持っているか調査してください。
+    2. 【前株・後株の厳格な一致】ユーザーの入力が「〇〇株式会社（後株）」や「株式会社〇〇（前株）」のように法人格の位置を明記している場合、法人格の位置や名称が異なる企業は、完全に別法人とみなして絶対に弾いてください（is_found: false）。
+    3. 【グループ会社の許可】ただし、対象企業の正規のグループ会社・子会社の拠点は「その企業の拠点（is_found: true）」として扱ってください。
+    4. 取得した公式情報（検索結果）をもとに、その企業（または正規グループ会社）が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に実在の直営拠点（支店、営業所、工場など）を持っているか調査してください。検索結果に九州の記載がない場合は「存在しない（is_found: false）」としてください。
     5. すでに閉業、閉鎖、廃止、移転完了している拠点は「存在しない（is_found: false）」と判定してください。
     6. "reasoning" には、検索結果や他社との比較に関するメタな解説やツッコミは含めず、九州拠点の有無や閉業に関する事実のみを1〜2文でシンプルに述べてください。
     7. この企業へのDX営業代行アプローチで、相手が食いつきそうなフックキーワード（10個）を "sales_keywords" の配列として抽出してください。
@@ -167,7 +167,7 @@ if st.session_state.search_history:
         default_query = selected_history
 
 with st.form(key="search_form"):
-    query = st.text_input("会社名、住所等を入力", value=default_query, placeholder="例: 〇〇株式会社")
+    query = st.text_input("会社名、住所等を入力", value=default_query, placeholder="例: さわやか株式会社")
     submit_button = st.form_submit_button("検索", type="primary")
 
 if submit_button:
@@ -182,7 +182,7 @@ if submit_button:
             st.session_state.search_history.pop()
 
         if query in st.session_state.result_cache:
-            st.info("⚡ キャッシュ（保存されたデータ）から表示しています")
+            st.info("⚡ キャッシュ（保存されたデータ）から高速表示しています（API消費ゼロ）")
             cached_data = st.session_state.result_cache[query]
             web_context = cached_data["web_context"]
             expanded_query = cached_data.get("expanded_query", "不明")
@@ -193,7 +193,7 @@ if submit_button:
                 st.error("⚠️ サーバーのVariablesにAPIキー（GEMINI_API_KEY）が設定されていません。")
                 st.stop()
 
-            with st.spinner(f"「{query}」を最適化して検索中..."):
+            with st.spinner(f"「{query}」の会社概要を検索中..."):
                 expanded_query = expand_query_with_ai(query, gemini_key)
                 web_context, err = search_ddg_lite(expanded_query)
                 
@@ -217,7 +217,7 @@ if submit_button:
         # ==========================================
         # 結果の描画
         # ==========================================
-        with st.expander("🔍 取得したWeb検索の生データ"):
+        with st.expander("🔍 取得したWeb検索の生データ (デバッグ用)"):
             st.markdown(f"**実際に検索したクエリ:** `{expanded_query}`")
             st.text(web_context)
         
