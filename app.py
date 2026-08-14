@@ -7,7 +7,6 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from google import genai
 from google.genai import types
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 st.set_page_config(page_title="九州拠点一括検索ツール", page_icon="✨", layout="wide")
 
@@ -32,7 +31,7 @@ def fetch_ddg_results(query: str):
     headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
-        res = requests.post(url, data=data, headers=headers, timeout=6)
+        res = requests.post(url, data=data, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, "html.parser")
         results = []
         rows = soup.find_all("tr")
@@ -86,7 +85,7 @@ def safe_parse_json(text):
         raise
 
 # ==========================================
-# 3. 複数社を一括でAI分析する関数
+# 3. 複数社を一括でAI分析する関数（バッチ処理・精度強化版）
 # ==========================================
 def analyze_companies_batch(batch_data, gemini_key):
     client = genai.Client(api_key=gemini_key)
@@ -95,29 +94,32 @@ def analyze_companies_batch(batch_data, gemini_key):
     for i, item in enumerate(batch_data):
         prompt_targets += f"\n=== 対象企業 {i+1}: {item['company']} ===\n【検索結果】\n{item['context']}\n"
 
-    template = (
-        "あなたは企業の所在調査のプロフェッショナルです。ハルシネーション（存在しない拠点をあると誤認すること）を厳禁とします。\n"
-        "以下の複数の企業について、それぞれ提供された検索結果を基に厳密に調査し、結果を必ず【JSONの配列（リスト）】で返してください。\n\n"
-        "{prompt_targets}\n\n"
-        "各企業ごとの共通指示:\n"
-        "1. \"company\": 入力された会社名をそのまま格納してください。\n"
-        "2. \"official_url\": 公式サイトのコーポレートサイトURL（Wikipedia、求人サイト、ニュースサイトは除外。見つからない場合は null）\n"
-        "3. \"is_found\": 九州地方（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に、現在稼働している直営の支店、営業所、工場、事業所が明確に裏付けられる場合のみ true としてください。以下の場合は必ず false にしてください：\n"
-        "   - 単なる「施工実績」「納入実績」「代理店」「パートナー企業」「別法人のグループ会社」の言及である場合\n"
-        "   - すでに閉鎖・廃止された拠点である場合\n"
-        "4. \"details\": 九州内の確実な直営拠点ごとの詳細情報（名称, 住所, URL）のリスト（見つからない場合は空配列 []）\n"
-        "5. \"sales_keywords\": 営業アプローチ用のキーワード10個のリスト\n\n"
-        "必ず以下のJSON配列フォーマットのみで回答してください：\n"
-        "[\n"
-        "    {\n"
-        "        \"company\": \"会社名\",\n"
-        "        \"is_found\": true,\n"
-        "        \"official_url\": \"https://...\",\n"
-        "        \"details\": [{\"name\": \"...\", \"address\": \"...\", \"url\": \"...\"}],\n"
-        "        \"sales_keywords\": [\"キーワード1\", \"キーワード2\", ...]\n"
-        "    }\n"
-        "]"
-    )
+    template = """
+あなたは企業の所在調査のプロフェッショナルです。ハルシネーション（存在しない拠点をあると誤認すること）を厳禁とします。
+以下の複数の企業について、それぞれ提供された検索結果を基に厳密に調査し、結果を必ず【JSONの配列（リスト）】で返してください。
+
+{prompt_targets}
+
+各企業ごとの共通指示:
+1. "company": 入力された会社名をそのまま格納してください。
+2. "official_url": 公式サイトのコーポレートサイトURL（Wikipedia、求人サイト、ニュースサイトは除外。見つからない場合は null）
+3. "is_found": 九州地方（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に、現在稼働している直営の支店、営業所、工場、事業所が明確に裏付けられる場合のみ true としてください。以下の場合は必ず false にしてください：
+   - 単なる「施工実績」「納入実績」「代理店」「パートナー企業」「別法人のグループ会社」の言及である場合
+   - すでに閉鎖・廃止された拠点である場合
+4. "details": 九州内の確実な直営拠点ごとの詳細情報（名称, 住所, URL）のリスト（見つからない場合は空配列 []）
+5. "sales_keywords": 営業アプローチ用のキーワード10個のリスト
+
+必ず以下のJSON配列フォーマットのみで回答してください（マークダウンの ```json や ``` で囲んでも構いません）：
+[
+    {
+        "company": "会社名",
+        "is_found": true,
+        "official_url": "https://...",
+        "details": [{"name": "...", "address": "...", "url": "..."}],
+        "sales_keywords": ["キーワード1", "キーワード2", ...]
+    }
+]
+    """
     prompt = template.replace("{prompt_targets}", prompt_targets)
 
     try:
@@ -172,32 +174,20 @@ if submit_button:
             else:
                 to_fetch.append(comp)
 
-        status_text.text("🌐 Web検索を実行中（高速並行処理）...")
+        status_text.text("🌐 Web検索を実行中...")
         fetched_data = []
-
-        def process_single_company(comp):
+        for i, comp in enumerate(to_fetch):
             context, raw_results = search_multi_queries(comp)
-            return {
+            fetched_data.append({
                 "company": comp,
                 "context": context,
                 "raw_results": raw_results
-            }
-
-        # 並行処理（マルチスレッド）で検索を高速化
-        completed_count = 0
-        if to_fetch:
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                future_to_comp = {executor.submit(process_single_company, comp): comp for comp in to_fetch}
-                for future in as_completed(future_to_comp):
-                    try:
-                        data = future.result()
-                        fetched_data.append(data)
-                    except:
-                        pass
-                    completed_count += 1
-                    progress_bar.progress((completed_count / max(len(to_fetch), 1)) * 0.5)
+            })
+            progress_bar.progress((i + 1) / max(len(to_fetch), 1) * 0.5)
 
         chunk_size = 10
+        analyzed_results = []
+        
         if fetched_data:
             status_text.text("🤖 AIによる一括分析を実行中...")
             for i in range(0, len(fetched_data), chunk_size):
