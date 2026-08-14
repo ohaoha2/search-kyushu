@@ -218,5 +218,3 @@ if submit_button:
                 st.markdown("### 🔑 フックキーワード")
                 keywords_md = " ".join([f"`{kw}`" for kw in keywords])
                 st.markdown(keywords_md)
-
-```
