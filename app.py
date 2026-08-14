@@ -69,7 +69,7 @@ def search_multi_queries(keyword: str):
     if not all_results:
         return "", []
         
-    context = "\n".join([f"- タイトル: {r['title']}\n  内容: {r['snippet']}\n  URL: {r['url']}" for r in all_results[:25]])
+    context = "\n".join([f"- タイトル: {r['title']}\n  内容: {r['snippet']}\n  URL: {r['url']}" for r in all_results[:30]])
     return context, all_results
 
 # ==========================================
@@ -80,43 +80,38 @@ def safe_parse_json(text):
         return json.loads(text)
     except json.JSONDecodeError:
         text = re.sub(r"```json|```", "", text).strip()
-        match = re.search(r"\[.*\]|\{.*\}", text, re.DOTALL)
+        match = re.search(r"\{.*\}", text, re.DOTALL)
         if match: return json.loads(match.group(0))
         raise
 
 # ==========================================
-# 3. 複数社を一括でAI分析する関数（バッチ処理）
+# 3. AI分析関数（従来の1社ごと処理）
 # ==========================================
-def analyze_companies_batch(batch_data, gemini_key):
+def analyze_company(company_name, web_context, gemini_key):
     client = genai.Client(api_key=gemini_key)
     
-    prompt_targets = ""
-    for i, item in enumerate(batch_data):
-        prompt_targets += f"\n=== 対象企業 {i+1}: {item['company']} ===\n【検索結果】\n{item['context']}\n"
-
     prompt = f"""
-あなたは企業の所在調査のプロフェッショナルです。
-以下の複数の企業について、それぞれ提供された検索結果を基に調査し、結果を必ず【JSONの配列（リスト）】で返してください。
+    あなたは企業の所在調査のプロフェッショナルです。
+    ユーザーが入力した正確な企業名: "{company_name}"
 
-{prompt_targets}
+    【取得した大量のWeb検索結果（最大30件）】
+    {web_context}
 
-各企業ごとの共通指示:
-1. "company": 入力された会社名をそのまま格納してください。前株や後株は厳密に判断してください。
-2. "official_url": 検索結果に含まれる「URL:」の行の中から、対象企業の「公式サイト（コーポレートサイト）」のURLを必ず1つ選択してください（Wikipedia、求人サイト、ニュースサイトは除外）。見つからない場合は null
-3. "is_found": 九州地方（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に支店、営業所、工場、グループ拠点等の直営拠点があれば true、なければ false。すでに閉業、閉鎖、廃止、移転完了している拠点は対象外
-4. "details": 九州内の拠点ごとの詳細情報（名称, 住所, URL）のリスト（見つからない場合は空配列 []）
-5. "sales_keywords": DX営業代行業務において相手に刺さるフックキーワード10個のリストをピックアップしてください
-    
-必ず以下のJSON配列フォーマットのみで回答してください（マークダウンの ```json や ``` で囲んでも構いません）：
-[
+    指示:
+    1. 検索結果に含まれる「URL:」の行の中から、対象企業の「公式サイト（コーポレートサイト）」のURLを必ず1つ選んで "official_url" に格納してください。Wikipediaや求人サイト、ニュースサイトではなく、企業の自社サイトを優先してください。どうしても見つからない場合のみ空文字 "" または null にしてください。
+    2. 入力された企業が九州地方（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に支店、営業所、工場、グループ拠点等の直営拠点を持っているかを徹底的に調査してください。少しでも九州における拠点や事業展開（福岡支店など）が確認できる場合は、必ず "is_found": true としてください。
+    3. すでに閉業、閉鎖、廃止、移転完了している拠点は「存在しない（is_found: false）」と判定してください。
+    4. 営業アプローチで有効なフックキーワードを "sales_keywords" に10個抽出してください。
+    5. 九州内の拠点ごとの詳細情報（名称, 住所, URL）を "details" リストに具体的にまとめてください。
+
+    必ず以下のJSONフォーマットのみで回答してください：
     {{
-        "company": "会社名",
+        "company": "{company_name}",
         "is_found": true,
         "official_url": "https://...",
         "details": [{{"name": "...", "address": "...", "url": "..."}}],
         "sales_keywords": ["キーワード1", "キーワード2", ...]
     }}
-]
     """
     try:
         response = client.models.generate_content(
@@ -126,8 +121,8 @@ def analyze_companies_batch(batch_data, gemini_key):
         )
         return safe_parse_json(response.text.strip())
     except Exception as e:
-        st.error(f"AI分析バッチ処理エラー: {str(e)}")
-        return []
+        st.error(f"AI分析エラー ({company_name}): {str(e)}")
+        return None
 
 # ==========================================
 # 4. Streamlit UI 構築
@@ -161,66 +156,43 @@ if submit_button:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        to_fetch = []
-        company_map = {}
-
-        for comp in company_list:
-            if comp in st.session_state.result_cache:
-                company_map[comp] = st.session_state.result_cache[comp]
-            else:
-                to_fetch.append(comp)
-
-        status_text.text("🌐 Web検索を実行中...")
-        fetched_data = []
-        for i, comp in enumerate(to_fetch):
-            context, raw_results = search_multi_queries(comp)
-            fetched_data.append({
-                "company": comp,
-                "context": context,
-                "raw_results": raw_results
-            })
-            progress_bar.progress((i + 1) / max(len(to_fetch), 1) * 0.5)
-
-        chunk_size = 10
-        analyzed_results = []
+        total_companies = len(company_list)
         
-        if fetched_data:
-            status_text.text("🤖 AIによる一括分析を実行中...")
-            for i in range(0, len(fetched_data), chunk_size):
-                chunk = fetched_data[i:i+chunk_size]
-                res_list = analyze_companies_batch(chunk, gemini_key)
+        for i, comp in enumerate(company_list):
+            status_text.text(f"🔍 調査・分析中 ({i+1}/{total_companies}): {comp}")
+            
+            # キャッシュチェック
+            if comp in st.session_state.result_cache:
+                res = st.session_state.result_cache[comp]
+            else:
+                context, raw_results = search_multi_queries(comp)
+                res = analyze_company(comp, context, gemini_key)
                 
-                if isinstance(res_list, list):
-                    for r in res_list:
-                        comp_name = r.get("company")
-                        if not r.get('official_url') or r.get('official_url') in ["null", ""]:
-                            for item in chunk:
-                                if item['company'] == comp_name and item['raw_results']:
-                                    for rr in item['raw_results']:
-                                        url_lower = rr['url'].lower()
-                                        if not any(x in url_lower for x in ["wikipedia", "job", "wantedly", "en-japan", "rikunabi", "mynavi", "yahoo", "google"]):
-                                            r['official_url'] = rr['url']
-                                            break
-                                    if not r.get('official_url') and item['raw_results']:
-                                        r['official_url'] = item['raw_results'][0]['url']
-                        
-                        company_map[comp_name] = r
-                        st.session_state.result_cache[comp_name] = r
+                if not res:
+                    res = {
+                        "company": comp,
+                        "is_found": False,
+                        "official_url": None,
+                        "details": [],
+                        "sales_keywords": []
+                    }
                 
-                progress_bar.progress(0.5 + ((i + len(chunk)) / len(fetched_data)) * 0.5)
-
-        for comp in company_list:
-            res = company_map.get(comp, {
-                "is_found": False,
-                "official_url": None,
-                "details": [],
-                "sales_keywords": []
-            })
+                # フォールバック処理（公式サイト補完）
+                if not res.get('official_url') or res.get('official_url') in ["null", "", "なし"]:
+                    for rr in raw_results:
+                        url_lower = rr['url'].lower()
+                        if not any(x in url_lower for x in ["wikipedia", "job", "wantedly", "en-japan", "rikunabi", "mynavi", "yahoo", "google"]):
+                            res['official_url'] = rr['url']
+                            break
+                    if (not res.get('official_url') or res.get('official_url') in ["null", "", "なし"]) and raw_results:
+                        res['official_url'] = raw_results[0]['url']
+                
+                st.session_state.result_cache[comp] = res
 
             is_found_str = "⭕ 九州拠点あり" if res.get('is_found') else "❌ 拠点なし"
             official_url = res.get('official_url')
-            if not official_url or official_url in ["null", ""]: 
-                official_url = "なし"
+            if not official_url or official_url in ["null", "", "なし"]: 
+                official_url = None
             
             details_summary = ", ".join([f"{d.get('name')} ({d.get('address')})" for d in res.get('details', [])])
             keywords_summary = ", ".join(res.get('sales_keywords', []))
@@ -228,12 +200,14 @@ if submit_button:
             batch_results.append({
                 "会社名": comp,
                 "判定": is_found_str,
-                "公式サイト": official_url,
+                "公式サイト": official_url if official_url else None,
                 "確認された拠点": details_summary if details_summary else "なし",
                 "フックキーワード": keywords_summary,
                 "_raw_details": res.get('details', []),
                 "_raw_keywords": res.get('sales_keywords', [])
             })
+            
+            progress_bar.progress((i + 1) / total_companies)
 
         progress_bar.progress(1.0)
         status_text.text("✅ すべての処理が完了しました！")
@@ -250,8 +224,17 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
 
     df_display = pd.DataFrame(results)[["会社名", "判定", "公式サイト", "確認された拠点", "フックキーワード"]]
     
+    # st.dataframe上でのURLハイパーリンク化対応
     st.dataframe(
         df_display,
+        column_config={
+            "公式サイト": st.column_config.LinkColumn(
+                "公式サイト",
+                help="クリックして公式サイトを開く",
+                max_chars=100,
+                display_url=None
+            )
+        },
         use_container_width=True
     )
 
@@ -274,7 +257,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
     
     for r in results:
         with st.expander(f"{r['会社名']} ── 【 {r['判定']} 】"):
-            if r['公式サイト'] and r['公式サイト'] != "なし":
+            if r['公式サイト'] and r['公式サイト'] is not None:
                 st.markdown(f"**🌐 公式サイト:** [{r['公式サイト']}]({r['公式サイト']})")
             else:
                 st.markdown("**🌐 公式サイト:** なし")
