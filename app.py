@@ -24,13 +24,12 @@ if "result_cache" not in st.session_state:
 # 1. キーワードの自動補正（もっともらしい企業の推測）
 # ==========================================
 def expand_query_with_ai(keyword: str, gemini_key):
-    """曖昧なキーワードから、世間で一般的な正式企業名や本社を推測する"""
     client = genai.Client(api_key=gemini_key)
     prompt = f"""
     ユーザーが入力したキーワード: "{keyword}"
-    このキーワードが指す、世間一般で最も広く知られている「正式な企業名」や「代表的なブランド・本社の特徴（例：業種や都道府県）」を1行で簡潔に教えてください。
-    余計な挨拶や解説は一切省き、検索に使えそうなキーワードの組み合わせのみを出力してください。
-    例: 「さわやか」→「炭焼きレストランさわやか 静岡 ハンバーグ」
+    このキーワードが指す、世間一般で最も広く知られている「正式な企業名」や「代表的なブランド・本社の特徴」を短く教えてください。
+    余計な挨拶や解説は一切省き、検索に使えそうなキーワードのみを出力してください。
+    例: 「さわやか」→「炭焼きレストランさわやか 静岡」
     """
     try:
         response = client.models.generate_content(
@@ -39,14 +38,15 @@ def expand_query_with_ai(keyword: str, gemini_key):
         )
         return response.text.strip()
     except:
-        return keyword  # 失敗した場合は元のキーワードを使う
+        return keyword
 
 # ==========================================
-# 2. DuckDuckGo Lite による検索関数
+# 2. DuckDuckGo Lite による検索関数（修正版）
 # ==========================================
 def search_ddg_lite(expanded_query: str):
     clean_kw = re.sub(r'[・"（）()]', ' ', expanded_query).strip()
-    query = f'"{clean_kw}" 九州 福岡 拠点 工場 支社'
+    # 長文をそのままクォーテーションで囲まないように修正
+    query = f"{clean_kw} 九州 拠点"
 
     url = "https://lite.duckduckgo.com/lite/"
     data = {'q': query}
@@ -115,7 +115,7 @@ def analyze_company_with_ai(query, web_context, gemini_key):
     {web_context}
 
     指示:
-    1. 【最重要・同名異法人の厳禁】入力された検索ターゲット（"{query}"）が特定のブランド名や企業名である場合、文字面が一致するだけの「全く無関係な同名企業・別法人（例：別業種のローカル企業など）」を対象に含めては絶対にいけません。
+    1. 【最重要・同名異法人の厳禁】入力された検索ターゲット（"{query}"）が特定のブランド名や企業名である場合、文字面が一致するだけの「全く無関係な同名企業・別法人」を対象に含めては絶対にいけません。
     2. その企業が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に実在の直営拠点（支店、営業所、工場など）を持っているか調査してください。
     3. すでに閉業、閉鎖、廃止、移転完了している拠点は「存在しない（is_found: false）」と判定してください。
     4. 確証がある場合は "is_found": true とし、企業名・拠点名、正確な住所や地域、URLを抽出してください。
@@ -180,10 +180,7 @@ if submit_button:
                 st.stop()
 
             with st.spinner(f"「{query}」を最適化して検索中..."):
-                # 1. 曖昧なキーワードをAIが補正
                 expanded_query = expand_query_with_ai(query, gemini_key)
-                
-                # 2. 補正されたキーワードでWeb検索
                 web_context, err = search_ddg_lite(expanded_query)
                 
                 if err:
