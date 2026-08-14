@@ -12,29 +12,33 @@ st.set_page_config(page_title="九州拠点検索", page_icon="✨")
 st.title("九州拠点検索・フックキーワード提案ツール")
 
 # ==========================================
-# 0. セッションステート（履歴 ＆ キャッシュ）の初期化
+# 0. セッションステート初期化
 # ==========================================
 if "search_history" not in st.session_state:
     st.session_state.search_history = []
-
 if "result_cache" not in st.session_state:
     st.session_state.result_cache = {}
 
 # ==========================================
-# 1. キーワードの自動補正（検索クエリの最適化）
+# 1. キーワード補正
 # ==========================================
 def expand_query_with_ai(keyword: str, gemini_key):
     client = genai.Client(api_key=gemini_key)
     prompt = f"""
     ユーザーが入力したキーワード: "{keyword}"
     
-    このキーワードが指す企業の【全国の拠点・事業所・店舗一覧、または会社概要】を正しくヒットさせるための、最適なWeb検索クエリを作成してください。
+    この企業の【全国の拠点・事業所・店舗一覧、または会社概要】を検索するためのクエリを作成してください。
     
     条件:
-    1. ユーザーが入力した会社名やキーワードを尊重し、適度に「会社概要」「拠点」「支店」「事業所」などのワードを付与すること。
-    2. 地域名（九州・福岡など）は検索ワードに強制固定せず、企業の公式情報が幅広くヒットするようにすること。
+    1. ユーザーの入力文字列（法人格を含む）をそのままダブルクォーテーションで囲んで検索ワードに含めること。
+    2. 地域名（九州・福岡など）は含めないこと。
+    3. 「会社概要 拠点 支店」などの一般的な言葉を付与すること。
     
-    余計な挨拶や解説は省き、検索クエリの文字列（1行）のみを出力してください。
+    出力例:
+    「株式会社ニデック」→ `"株式会社ニデック" 会社概要 拠点 支店`
+    「ニデック株式会社」→ `"ニデック株式会社" 会社概要 拠点 支店`
+    
+    検索クエリの文字列（1行）のみを出力してください。
     """
     try:
         response = client.models.generate_content(
@@ -43,113 +47,139 @@ def expand_query_with_ai(keyword: str, gemini_key):
         )
         return response.text.strip()
     except:
-        return f'{keyword} 会社概要 拠点 支店'
+        return f'"{keyword}" 会社概要 拠点 支店'
 
 # ==========================================
-# 2. DuckDuckGo Lite による検索関数
+# 2. 検索関数
 # ==========================================
 def search_ddg_lite(expanded_query: str):
     clean_kw = expanded_query.strip().replace('`', '')
-    
     url = "https://lite.duckduckgo.com/lite/"
     data = {'q': clean_kw}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
         res = requests.post(url, data=data, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, "html.parser")
-        
         results = []
         rows = soup.find_all("tr")
-        current_title = ""
-        current_url = ""
-        
+        current_title = ""; current_url = ""
         for row in rows:
             link_tag = row.find("a", class_="result-link")
             if link_tag:
-                current_title = link_tag.text.strip()
-                current_url = link_tag["href"]
-            
+                current_title = link_tag.text.strip(); current_url = link_tag["href"]
             snippet_tag = row.find("td", class_="result-snippet")
             if snippet_tag:
                 current_snippet = snippet_tag.text.strip()
                 if current_title and current_url:
-                    results.append({
-                        'title': current_title,
-                        'url': current_url,
-                        'snippet': current_snippet
-                    })
-                    current_title = ""
-                    current_url = ""
-
-        if not results:
-            return None, "検索結果を取得できませんでした。"
-            
+                    results.append({'title': current_title, 'url': current_url, 'snippet': current_snippet})
+                    current_title = ""; current_url = ""
+        
+        if not results: return None, "検索結果を取得できませんでした。"
         context = "\n".join([f"- タイトル: {r['title']}\n  内容: {r['snippet']}\n  URL: {r['url']}" for r in results[:6]])
         return context, None
-
     except Exception as e:
         return None, f"検索エラー: {str(e)}"
 
 # ==========================================
-# 3. JSONパースの安全装置付き・分析関数
+# 3. Pythonによる物理バリデーション（前株・後株の厳格チェック）
 # ==========================================
-def safe_parse_json(text):
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        text = re.sub(r"```json", "", text)
-        text = re.sub(r"```", "", text).strip()
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        raise
+def validate_corporate_match(user_query: str, result: dict):
+    """
+    ユーザーが入力した法人格の形式（前株か後株か）と、
+    AIが取得した結果の企業名が一致しているかをPython側で強制チェックし、
+    異なる場合は問答無用で非該当（is_found = False）に書き換える
+    """
+    cleaned_query = user_query.replace(" ", "")
+    
+    # ユーザーが「前株（株式会社〇〇）」で入力した場合
+    if cleaned_query.startswith("株式会社"):
+        core_name = cleaned_query.replace("株式会社", "")
+        wrong_pattern = f"{core_name}株式会社" # 後株
+        
+        # details内の企業名をチェック
+        valid_details = []
+        for d in result.get('details', []):
+            name = d.get('name', '').replace(" ", "")
+            # 後株のパターンが含まれていて、かつ前株の正しい名前が含まれていない場合は除外
+            if wrong_pattern in name and cleaned_query not in name:
+                continue
+            valid_details.append(d)
+            
+        result['details'] = valid_details
+        
+        # 推論テキストや詳細に後株の誤認が含まれている場合もブロック
+        reasoning = result.get('reasoning', '')
+        if wrong_pattern in reasoning and cleaned_query not in reasoning:
+            result['is_found'] = False
+            result['reasoning'] = f"入力された前株形式（{user_query}）と一致する企業情報が確認できなかったため除外しました。"
+            result['details'] = []
 
+    # ユーザーが「後株（〇〇株式会社）」で入力した場合
+    elif cleaned_query.endswith("株式会社"):
+        core_name = cleaned_query.replace("株式会社", "")
+        wrong_pattern = f"株式会社{core_name}" # 前株
+        
+        valid_details = []
+        for d in result.get('details', []):
+            name = d.get('name', '').replace(" ", "")
+            if wrong_pattern in name and cleaned_query not in name:
+                continue
+            valid_details.append(d)
+            
+        result['details'] = valid_details
+        
+        reasoning = result.get('reasoning', '')
+        if wrong_pattern in reasoning and cleaned_query not in reasoning:
+            result['is_found'] = False
+            result['reasoning'] = f"入力された後株形式（{user_query}）と一致する企業情報が確認できなかったため除外しました。"
+            result['details'] = []
+
+    return result
+
+# ==========================================
+# 4. 分析関数
+# ==========================================
 def analyze_company_with_ai(query, web_context, gemini_key):
     client = genai.Client(api_key=gemini_key)
-    
     prompt = f"""
-    あなたは企業の所在調査およびDX営業戦略のプロフェッショナルです。
-    ユーザーが入力したキーワード/企業名: "{query}"
+    あなたは企業の所在調査のプロです。
+    ユーザーが入力した正確なターゲット名: "{query}"
 
-    【取得したWeb検索結果】
+    【Web検索結果】
     {web_context}
 
     指示:
     1. 検索結果から「企業公式サイト(Official HP)」のURLを特定し、"official_url" に格納してください（見つからない場合は null）。
-    2. 【同名異法人の厳禁】文字面が一部一致するだけの全く無関係な別法人を除外しつつ、正規のグループ会社や子会社の拠点は「その企業の拠点」として扱ってください。
-    3. その企業（または正規グループ会社）が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に実在の直営拠点（支店、営業所、工場など）を持っているか調査してください。
-    4. "reasoning" には、九州拠点の有無に関する事実を1〜2文で簡潔に述べてください。
-    5. この企業へのDX営業アプローチで有効なフックキーワードを "sales_keywords" に10個抽出してください。
-
-    必ず以下のJSONフォーマットのみで回答してください：
+    2. 【最重要：法人格の厳格一致】ユーザーが入力した法人格の形（前株か後株か）を完全に一致させてください。例えば「株式会社ニデック」と入力された場合、「ニデック株式会社」は別法人として扱ってください。
+    3. 入力された企業名と完全に一致する企業が、九州に直営拠点を持っているか調査してください。
+    4. 必ず以下のJSONフォーマットのみで回答してください。
+    
     {{
         "is_found": trueまたはfalse,
         "official_url": "公式サイトのURLまたはnull",
-        "reasoning": "1〜2文の簡潔な判定理由",
-        "details": [
-            {{"name": "企業名・拠点名", "address": "住所・地域", "url": "URL"}}
-        ],
+        "reasoning": "判定理由",
+        "details": [{{"name": "企業名・拠点名", "address": "住所", "url": "URL"}}],
         "sales_keywords": ["キーワード1", "キーワード2", "キーワード3", "キーワード4", "キーワード5", "キーワード6", "キーワード7", "キーワード8", "キーワード9", "キーワード10"]
     }}
     """
     
     response = client.models.generate_content(
-        model='gemini-3.5-flash-lite',
+        model='gemini-3.5-flash',
         contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json"
-        ),
+        config=types.GenerateContentConfig(response_mime_type="application/json"),
     )
     
-    return safe_parse_json(response.text.strip())
+    text = response.text.strip()
+    text = re.sub(r"```json", "", text).replace("```", "").strip()
+    raw_result = json.loads(text)
+    
+    # ★Pythonによる物理バリデーションを通す★
+    return validate_corporate_match(query, raw_result)
 
 # ==========================================
-# 4. Streamlit UI 構築
+# 5. Streamlit UI 構築
 # ==========================================
-
 default_query = ""
 if st.session_state.search_history:
     selected_history = st.selectbox(
@@ -160,12 +190,12 @@ if st.session_state.search_history:
         default_query = selected_history
 
 with st.form(key="search_form"):
-    query = st.text_input("会社名、キーワード等を入力", value=default_query, placeholder="例: ニデック")
+    query = st.text_input("会社名を入力 (前株・後株を正確に区別して入力)", value=default_query, placeholder="例: 株式会社ニデック")
     submit_button = st.form_submit_button("検索", type="primary")
 
 if submit_button:
     if not query:
-        st.warning("会社名、キーワード等を入力してください。")
+        st.warning("会社名を入力してください。")
     else:
         if query in st.session_state.search_history:
             st.session_state.search_history.remove(query)
@@ -174,7 +204,7 @@ if submit_button:
             st.session_state.search_history.pop()
 
         if query in st.session_state.result_cache:
-            st.info("⚡ キャッシュ（保存されたデータ）から高速表示しています（API消費ゼロ）")
+            st.info("⚡ キャッシュから高速表示しています（API消費ゼロ）")
             cached_data = st.session_state.result_cache[query]
             web_context = cached_data["web_context"]
             expanded_query = cached_data.get("expanded_query", "不明")
@@ -205,22 +235,18 @@ if submit_button:
                     st.error(f"分析エラーが発生しました: {e}")
                     st.stop()
 
-        # ==========================================
-        # 結果の描画
-        # ==========================================
         with st.expander("🔍 取得したWeb検索の生データ (デバッグ用)"):
             st.markdown(f"**実際に検索したクエリ:** `{expanded_query}`")
             st.text(web_context)
         
         st.divider()
         
-        # 公式サイトの表示（判定結果にかかわらず、URLが取得できていれば上部に表示）
         official_url = result.get('official_url')
         if official_url and official_url != "null":
             st.markdown(f"### 🌐 公式サイト\n[{official_url}]({official_url})")
 
         if result.get('is_found'):
-            st.success(f"⭕ 九州拠点が確認されました。")
+            st.success(f"⭕ 入力された法人名と一致し、九州拠点が確認されました。")
             st.info(f"**判定理由:** {result.get('reasoning')}")
             
             keywords = result.get('sales_keywords', [])
@@ -237,7 +263,7 @@ if submit_button:
                     if d.get('url'):
                         st.markdown(f"[詳細リンク]({d.get('url')})")
         else:
-            st.error(f"❌ 九州拠点は確認されませんでした。")
+            st.error(f"❌ 入力された法人名に完全一致する九州拠点は確認されませんでした。")
             st.write(f"**判定理由:** {result.get('reasoning')}")
             
             keywords = result.get('sales_keywords', [])
