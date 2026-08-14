@@ -107,7 +107,7 @@ def analyze_companies_batch(batch_data, gemini_key):
    - すでに閉鎖・廃止された拠点である場合
    - details が空配列 [] の場合
 5. "sales_keywords": DX営業代行で相手に刺さるフックキーワード10個のリスト
-6. "notes": 提供された検索結果の中に、ここ3年以内の以下のいずれかの重要トピックがある場合のみ、具体的に1〜2文で簡潔に記載してください。
+6. "notes": 提供された検索結果の中に、ここ3年以内の以下のいずれかの重要トピックがある場合のみ、体言止めや短い名詞句で簡潔に記載してください。
    - 社名変更・商号変更
    - 拠点新設、移転、拡張
    - M&A、グループ再編、組織変更
@@ -232,7 +232,7 @@ if submit_button:
                 res['is_found'] = False
                 valid_details = []
 
-            is_found_str = "九州拠点あり" if res.get('is_found') else "九州拠点なし"
+            is_found_str = "⭕️九州拠点あり" if res.get('is_found') else "九州拠点なし"
             official_url = res.get('official_url')
             if not official_url or official_url in ["null", ""]: 
                 official_url = None
