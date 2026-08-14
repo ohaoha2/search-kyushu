@@ -9,8 +9,7 @@ from google.genai import types
 
 st.set_page_config(page_title="九州拠点一括検索ツール", page_icon="✨", layout="wide")
 
-st.title("✨ 九州拠点一括検索・フックキーワード提案ツール")
-st.markdown("Tavily AIとGeminiを活用した、安定・高速な一括調査ツールです。")
+st.title("企業情報一括検索")
 
 # ==========================================
 # APIキーの自動取得（Secrets優先）
@@ -51,8 +50,9 @@ def fetch_tavily_results(query: str, api_key: str):
 def search_multi_queries(keyword: str, api_key: str):
     q1 = f'"{keyword}" 会社概要 公式サイト'
     q2 = f'"{keyword}" 九州 福岡 支店 営業所'
+    q3 = f'"{keyword}" 社名変更 商号変更'
     
-    queries = [q1, q2]
+    queries = [q1, q2, q3]
     all_results = []
     seen_urls = set()
     
@@ -107,6 +107,7 @@ def analyze_companies_batch(batch_data, gemini_key):
    - すでに閉鎖・廃止された拠点である場合
    - details が空配列 [] の場合
 5. "sales_keywords": DX営業代行で相手に刺さるフックキーワード10個のリスト
+6. "notes": 提供された検索結果テキスト（PDFの内容や外部ドキュメントを含む）の中に、企業の「社名変更」「商号変更」に関する記述がある場合は、必ずその変更時期や新しい名称などの詳細をここに記載してください。特になければ空文字 ""
 
 必ず以下のJSON配列フォーマットのみで回答してください：
 [
@@ -115,7 +116,8 @@ def analyze_companies_batch(batch_data, gemini_key):
         "is_found": true,
         "official_url": "https://...",
         "details": [{"name": "...", "address": "...", "url": "..."}],
-        "sales_keywords": ["キーワード1", "キーワード2", ...]
+        "sales_keywords": ["キーワード1", "キーワード2", ...],
+        "notes": "社名変更や特記事項があれば必ずここに記載"
     }
 ]
     """
@@ -123,7 +125,7 @@ def analyze_companies_batch(batch_data, gemini_key):
 
     try:
         response = client.models.generate_content(
-            model='gemini-3.5-flash-lite',
+            model='gemini-2.5-flash',
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
@@ -170,7 +172,7 @@ if submit_button:
             else:
                 to_fetch.append(comp)
 
-        status_text.text("🌐 Tavily AIで高速検索を実行中...")
+        status_text.text("検索中...")
         fetched_data = []
         for i, comp in enumerate(to_fetch):
             context, raw_results = search_multi_queries(comp, tavily_api_key)
@@ -184,7 +186,7 @@ if submit_button:
         chunk_size = 10
         
         if fetched_data:
-            status_text.text("🤖 AIによる一括分析を実行中...")
+            status_text.text("一括分析を実行中...")
             for i in range(0, len(fetched_data), chunk_size):
                 chunk = fetched_data[i:i+chunk_size]
                 res_list = analyze_companies_batch(chunk, gemini_key)
@@ -213,7 +215,8 @@ if submit_button:
                 "is_found": False,
                 "official_url": None,
                 "details": [],
-                "sales_keywords": []
+                "sales_keywords": [],
+                "notes": ""
             })
 
             is_found_str = "⭕ 九州拠点あり" if res.get('is_found') else "❌ 九州拠点なし"
@@ -223,6 +226,7 @@ if submit_button:
             
             details_summary = ", ".join([f"{d.get('name')} ({d.get('address')})" for d in res.get('details', [])])
             keywords_summary = ", ".join(res.get('sales_keywords', []))
+            notes_text = res.get('notes', '')
 
             batch_results.append({
                 "会社名": comp,
@@ -230,8 +234,10 @@ if submit_button:
                 "公式サイト": official_url,
                 "九州拠点": details_summary if details_summary else "なし",
                 "フックキーワード": keywords_summary,
+                "特記事項": notes_text,
                 "_raw_details": res.get('details', []),
-                "_raw_keywords": res.get('sales_keywords', [])
+                "_raw_keywords": res.get('sales_keywords', []),
+                "_raw_notes": notes_text
             })
 
         progress_bar.progress(1.0)
@@ -247,7 +253,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
     st.divider()
     st.subheader("📊 検索・分析結果一覧")
 
-    df_display = pd.DataFrame(results)[["会社名", "判定", "公式サイト", "九州拠点", "フックキーワード"]]
+    df_display = pd.DataFrame(results)[["会社名", "判定", "公式サイト", "九州拠点", "フックキーワード", "特記事項"]]
     
     st.dataframe(
         df_display,
@@ -281,6 +287,9 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
         with st.expander(f"{r['会社名']} ── 【 {r['判定']} 】"):
             if r['公式サイト']:
                 st.markdown(f"**🌐 公式サイト:** [{r['公式サイト']}]({r['公式サイト']})")
+            
+            if r.get('_raw_notes'):
+                st.info(f"💡 **特記事項:** {r['_raw_notes']}")
             
             if r['_raw_keywords']:
                 st.markdown("**🔑 フックキーワード:**")
