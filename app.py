@@ -40,7 +40,7 @@ def analyze_company_with_google_search(query, gemini_key):
     
     # Google公式の検索ツール（Grounding）を有効化
     response = client.models.generate_content(
-        model='gemini-3.5-flash', # 安定して検索ツールが使えるモデル
+        model='gemini-2.5-flash', # 安定して検索ツールが使えるモデル
         contents=prompt,
         config=types.GenerateContentConfig(
             tools=[{'google_search': {}}],
