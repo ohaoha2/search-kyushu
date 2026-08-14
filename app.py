@@ -108,4 +108,142 @@ def safe_parse_json(text):
         return json.loads(text)
     except json.JSONDecodeError:
         text = re.sub(r"```json", "", text)
-        text = re.sub(r"
+        text = re.sub(r"```", "", text).strip()
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        raise
+
+def analyze_company_with_ai(query, web_context, gemini_key):
+    client = genai.Client(api_key=gemini_key)
+    
+    prompt = f"""
+    あなたは企業の所在調査およびDX営業戦略のプロフェッショナルです。
+    ユーザーが本来検索したかったターゲット: "{query}"
+
+    【取得したWeb検索結果】
+    {web_context}
+
+    指示:
+    1. 【最重要・同名異法人の厳禁】文字面が一致するだけの「全く無関係な同名企業・ローカル別法人」を対象に含めては絶対にいけません。
+    2. 【グループ会社の許可】ただし、対象企業の正規のグループ会社・子会社（例：ニデックに対する「ニデックテクノモータ」など）の拠点は、無関係な別法人ではなく「その企業の拠点（is_found: true）」として扱ってください。
+    3. その企業（または正規グループ会社）が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に実在の直営拠点（支店、営業所、工場など）を持っているか調査してください。
+    4. すでに閉業、閉鎖、廃止、移転完了している拠点は「存在しない（is_found: false）」と判定してください。
+    5. "reasoning" には、検索結果や他社との比較に関するメタな解説やツッコミは含めず、九州拠点の有無や閉業に関する事実のみを1〜2文でシンプルに述べてください。
+    6. この企業へのDX営業代行アプローチで、相手が食いつきそうなフックキーワード（10個）を "sales_keywords" の配列として抽出してください。
+
+    必ず以下のJSONフォーマットのみで回答してください：
+    {{
+        "is_found": trueまたはfalse,
+        "reasoning": "1〜2文の簡潔な判定理由",
+        "details": [
+            {{"name": "企業名・拠点名", "address": "住所・地域", "url": "URL"}}
+        ],
+        "sales_keywords": ["キーワード1", "キーワード2", "キーワード3", "キーワード4", "キーワード5", "キーワード6", "キーワード7", "キーワード8", "キーワード9", "キーワード10"]
+    }}
+    """
+    
+    response = client.models.generate_content(
+        model='gemini-3.5-flash-lite',
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json"
+        ),
+    )
+    
+    return safe_parse_json(response.text.strip())
+
+# ==========================================
+# 4. Streamlit UI 構築
+# ==========================================
+
+default_query = ""
+if st.session_state.search_history:
+    selected_history = st.selectbox(
+        "🕒 過去の検索履歴から選ぶ",
+        ["-- 履歴から選択する --"] + st.session_state.search_history
+    )
+    if selected_history != "-- 履歴から選択する --":
+        default_query = selected_history
+
+with st.form(key="search_form"):
+    query = st.text_input("会社名、住所等を入力", value=default_query, placeholder="例: ニデック")
+    submit_button = st.form_submit_button("検索", type="primary")
+
+if submit_button:
+    if not query:
+        st.warning("会社名、住所等を入力してください。")
+    else:
+        # 履歴更新
+        if query in st.session_state.search_history:
+            st.session_state.search_history.remove(query)
+        st.session_state.search_history.insert(0, query)
+        if len(st.session_state.search_history) > 10:
+            st.session_state.search_history.pop()
+
+        if query in st.session_state.result_cache:
+            st.info("⚡ キャッシュ（保存されたデータ）から高速表示しています（API消費ゼロ）")
+            cached_data = st.session_state.result_cache[query]
+            web_context = cached_data["web_context"]
+            expanded_query = cached_data.get("expanded_query", "不明")
+            result = cached_data["result"]
+        else:
+            gemini_key = os.getenv("GEMINI_API_KEY")
+            if not gemini_key:
+                st.error("⚠️ サーバーのVariablesにAPIキー（GEMINI_API_KEY）が設定されていません。")
+                st.stop()
+
+            with st.spinner(f"「{query}」を最適化して検索中..."):
+                expanded_query = expand_query_with_ai(query, gemini_key)
+                web_context, err = search_ddg_lite(expanded_query)
+                
+                if err:
+                    st.error(err)
+                    st.stop()
+
+            with st.spinner("分析中..."):
+                try:
+                    result = analyze_company_with_ai(query, web_context, gemini_key)
+                    # キャッシュ保存
+                    st.session_state.result_cache[query] = {
+                        "web_context": web_context,
+                        "expanded_query": expanded_query,
+                        "result": result
+                    }
+                except Exception as e:
+                    st.error(f"分析エラーが発生しました: {e}")
+                    st.stop()
+
+        # ==========================================
+        # 結果の描画
+        # ==========================================
+        with st.expander("🔍 取得したWeb検索の生データ (デバッグ用)"):
+            st.markdown(f"**実際に検索したクエリ:** `{expanded_query}`")
+            st.text(web_context)
+        
+        st.divider()
+        if result.get('is_found'):
+            st.success(f"⭕ 九州拠点が確認されました。")
+            st.info(f"**判定理由:** {result.get('reasoning')}")
+            
+            keywords = result.get('sales_keywords', [])
+            if keywords:
+                st.markdown("### 🔑 フックキーワード")
+                keywords_md = " ".join([f"`{kw}`" for kw in keywords])
+                st.markdown(keywords_md)
+            
+            st.markdown("### 📍 企業・拠点詳細")
+            for d in result.get('details', []):
+                with st.container(border=True):
+                    st.markdown(f"**{d.get('name')}**")
+                    st.write(f"住所: {d.get('address')}")
+                    st.markdown(f"[詳細リンク]({d.get('url')})")
+        else:
+            st.error(f"❌ 九州拠点は確認されませんでした。")
+            st.write(f"**判定理由:** {result.get('reasoning')}")
+            
+            keywords = result.get('sales_keywords', [])
+            if keywords:
+                st.markdown("### 🔑 フックキーワード")
+                keywords_md = " ".join([f"`{kw}`" for kw in keywords])
+                st.markdown(keywords_md)
