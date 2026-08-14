@@ -594,7 +594,7 @@ def analyze_companies_batch(
                     f"{r.get('url', '')}"
                 )
 
-                for r in q1_results[:20]
+                for r in q1_results[:5]
             ]
         )
 
@@ -612,7 +612,7 @@ def analyze_companies_batch(
                     f"{r.get('url', '')}"
                 )
 
-                for r in q2_results[:30]
+                for r in q2_results[:10]
             ]
         )
 
