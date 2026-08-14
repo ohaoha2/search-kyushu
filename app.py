@@ -39,7 +39,7 @@ def analyze_company_with_free_search(query, gemini_key):
     
     # 無料枠でGoogle検索が使える gemini-2.5-flash を指定
     response = client.models.generate_content(
-        model='gemini-3-flash',
+        model='gemini-3-flash-preview',
         contents=prompt,
         config=types.GenerateContentConfig(
             tools=[{'google_search': {}}],
