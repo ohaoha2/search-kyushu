@@ -24,28 +24,14 @@ kyushu_prefectures = ["福岡", "佐賀", "長崎", "熊本", "大分", "宮崎"
 
 def is_excluded_domain(domain: str):
     if not domain: return True
-    
-    # 外部メディア、求人、医療・情報ポータルの完全ブロックリスト
     excluded_domains = [
-        "wikipedia.org", "yahoo.co.jp", "news.yahoo.co.jp", "nikkei.com", "toyokeizai.net",
+        "wikipedia.org", "yahoo.co.jp", "nikkei.com", "toyokeizai.net",
         "mynavi.jp", "rikunabi.com", "en-japan.com", "wantedly.com", "indeed.com",
-        "onecareer.jp", "doda.jp", "type.jp", "bizreach.jp", "green-japan.com",
-        "openwork.jp", "vorkers.com", "jobtalk.jp", "en-hyouban.com", "syukatsu-kaigi.jp",
-        "metoree.com", "baseconnect.in", "houjin-bangou.nta.go.jp", "salesnow.jp",
-        "irbank.net", "strainer.jp", "prtimes.jp", "navitime.co.jp", "alarmbox.jp", 
-        "houjin.jp", "cataso.jp", "syokugyou.net", "kaisha.site", "g-search.jp",
-        "m3.com", "pcareer.m3.com", "mapion.co.jp", "e-navita.jp", "itp.ne.jp",
-        "jpma.or.jp", "shukatsu-line.pref.toyama.lg.jp"
+        "onecareer.jp", "doda.jp", "bizreach.jp", "green-japan.com"
     ]
     if any(domain == excluded or domain.endswith("." + excluded) for excluded in excluded_domains):
         return True
-        
-    ng_substrings = ["shukatsu", "tenshoku", "syukatsu", "career", "job", "m3"]
-    ng_suffixes = [".lg.jp", ".ac.jp", ".go.jp"]
-    
-    if any(ng in domain.lower() for ng in ng_substrings): return True
-    if any(domain.lower().endswith(suf) for suf in ng_suffixes): return True
-        
+    if any(ng in domain.lower() for ng in ["shukatsu", "tenshoku", "career", "job"]): return True
     return False
 
 def extract_domain(url: str):
@@ -58,7 +44,7 @@ def extract_domain(url: str):
         return None
 
 # ==========================================
-# 1. Tavily検索機能（公式URL 100%保証ロジック）
+# 1. Tavily検索機能
 # ==========================================
 def fetch_tavily_results(query: str, api_key: str, include_domains=None):
     try:
@@ -74,8 +60,8 @@ def search_company_info(company_info: dict, api_key: str):
     company_name = company_info["name"]
     context = company_info["context"]
 
-    # ステップ1: 公式ドメインを厳格に特定するための検索
-    q1_query = f'"{company_name}" {context} 公式サイト 企業情報'
+    # 会社名とコンテキスト（指定があれば）を含めて検索
+    q1_query = f'"{company_name}" {context} 公式サイト 会社概要 企業情報'
     q1_results = fetch_tavily_results(q1_query, api_key)
     
     official_domain = None
@@ -83,13 +69,11 @@ def search_company_info(company_info: dict, api_key: str):
     for r in q1_results:
         domain = extract_domain(r["url"])
         if is_excluded_domain(domain): continue
-        # .co.jp, .com, .jp などのコーポレートドメインを最優先で公式ドメインとして認定
         if domain and (domain.endswith(".co.jp") or domain.endswith(".com") or domain.endswith(".jp")):
             valid_q1.append(r)
             if not official_domain:
                 official_domain = domain
 
-    # ステップ2: 公式ドメインが特定できたら、そのサイト内の「会社概要」をピンポイントで再取得する（URLのブレを完全に排除）
     q1_filtered = []
     if official_domain:
         target_query = f'site:{official_domain} 会社概要 OR 企業情報 OR about OR outline'
@@ -98,10 +82,9 @@ def search_company_info(company_info: dict, api_key: str):
     else:
         q1_filtered = valid_q1
 
-    # ステップ3: 公式ドメイン内の拠点情報検索
     q2_results = []
     if official_domain:
-        q2_query = f'site:{official_domain} 拠点 OR 支店 OR 営業所 OR 福岡 OR 九州'
+        q2_query = f'site:{official_domain} 拠点 OR 支店 OR 営業所 OR 事業所 OR 店舗 OR 福岡 OR 九州'
         q2_results = fetch_tavily_results(q2_query, api_key, include_domains=[official_domain])
 
     return {
@@ -122,10 +105,10 @@ def analyze_companies_batch(batch_data, gemini_key):
         q2_text = "\n".join([f"- URL: {r['url']}\n  内容: {r['snippet']}" for r in item.get("q2_results", [])[:5]])
         
         prompt_targets += (
-            f"\n=== 対象企業 {i + 1}: {item['company']['name']} ({item['company']['context']}) ===\n"
-            f"【特定された公式ドメイン】\n{item.get('official_domain', '不明')}\n"
-            f"【公式会社概要ページ情報】\n{q1_text if q1_text else '情報なし'}\n"
-            f"【公式拠点情報】\n{q2_text if q2_text else '情報なし'}\n"
+            f"\n=== 対象企業 {i + 1}: {item['company']['name']} (補足: {item['company']['context']}) ===\n"
+            f"【公式ドメイン】\n{item.get('official_domain', '不明')}\n"
+            f"【会社概要ページ情報】\n{q1_text if q1_text else '情報なし'}\n"
+            f"【拠点・店舗情報】\n{q2_text if q2_text else '情報なし'}\n"
         )
 
     template = """
@@ -136,11 +119,11 @@ def analyze_companies_batch(batch_data, gemini_key):
 
 1. "input_company": 入力された会社名。
 2. "correct_company_name": 情報から確認できる正式名称。
-3. "profile_url": 【公式会社概要ページ情報】のURLリストの中から、特定された公式ドメイン配下にある「会社概要」や「企業情報」に最も該当するURLを1つ必ず記載。外部サイトのURLは絶対に選ばないこと。
-4. "details": 九州内（福岡,佐賀,長崎,熊本,大分,宮崎,鹿児島）の公式拠点情報。
-【超重要】公式サイトに記載されている直営の支店・営業所・事業所のみを対象とする（外部の提携物流センターなどは除外）。
+3. "profile_url": 【会社概要ページ情報】のURLリストの中から、公式サイト内の「会社概要」や「企業情報」に最も該当するURLを1つ記載。なければnull。
+4. "details": 九州内（福岡,佐賀,長崎,熊本,大分,宮崎,鹿児島）の拠点・支店・営業所・事業所・店舗情報。
+【重要】公式情報に含まれる九州内の拠点や店舗（リフォーム事業部などの部門拠点も含む）を漏れなく抽出してください。
 [{"name": "拠点名称", "address": "住所", "url": "その情報を裏付けるURL"}]
-5. "reason": 判定理由（1文）。
+5. "reason": 九州拠点の有無についての判定理由（1文）。
 6. "department_keywords": 対象企業の主要部署（最大4つ）に対し、ITツール（DX等）を提案するためのフックキーワードを3つずつ。
 [{"department": "営業部", "keywords": ["SFA導入", "オンライン商談", "名刺管理"]}]
 7. "notes": 特記事項。なければ[]。
