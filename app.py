@@ -44,7 +44,7 @@ def extract_domain(url: str):
         return None
 
 # ==========================================
-# 1. Tavily検索機能
+# 1. 前株・後株構造を考慮した Tavily 検索機能
 # ==========================================
 def fetch_tavily_results(query: str, api_key: str, include_domains=None):
     try:
@@ -56,12 +56,11 @@ def fetch_tavily_results(query: str, api_key: str, include_domains=None):
     except Exception:
         return []
 
-def search_company_info(company_info: dict, api_key: str):
-    company_name = company_info["name"]
-    context = company_info["context"]
-
-    # 会社名とコンテキスト（指定があれば）を含めて検索
-    q1_query = f'"{company_name}" {context} 公式サイト 会社概要 企業情報'
+def search_company_info(company_name: str, api_key: str):
+    clean_name = company_name.strip()
+    
+    # 前株・後株の構造をそのまま正確にクエリに反映させる
+    q1_query = f'"{clean_name}" 公式サイト 会社概要 企業情報'
     q1_results = fetch_tavily_results(q1_query, api_key)
     
     official_domain = None
@@ -94,7 +93,7 @@ def search_company_info(company_info: dict, api_key: str):
     }
 
 # ==========================================
-# 2. AI分析機能
+# 2. 汎用 AI分析機能 (gemini-3.5-flash-lite)
 # ==========================================
 def analyze_companies_batch(batch_data, gemini_key):
     client = genai.Client(api_key=gemini_key)
@@ -105,21 +104,26 @@ def analyze_companies_batch(batch_data, gemini_key):
         q2_text = "\n".join([f"- URL: {r['url']}\n  内容: {r['snippet']}" for r in item.get("q2_results", [])[:5]])
         
         prompt_targets += (
-            f"\n=== 対象企業 {i + 1}: {item['company']['name']} (補足: {item['company']['context']}) ===\n"
-            f"【公式ドメイン】\n{item.get('official_domain', '不明')}\n"
-            f"【会社概要ページ情報】\n{q1_text if q1_text else '情報なし'}\n"
-            f"【拠点・店舗情報】\n{q2_text if q2_text else '情報なし'}\n"
+            f"\n=== 対象企業 {i + 1} ===\n"
+            f"【入力された会社名（前株・後株の構造に注意）】: {item['company_name']}\n"
+            f"【抽出された公式ドメイン候補】: {item.get('official_domain', '不明')}\n"
+            f"【会社概要ページ候補】\n{q1_text if q1_text else '情報なし'}\n"
+            f"【拠点・店舗ページ候補】\n{q2_text if q2_text else '情報なし'}\n"
         )
 
     template = """
 あなたは企業の所在調査とIT提案のプロフェッショナルです。
 以下の複数企業について調査し、必ずJSON配列で返してください。
 
+【最重要ルール：前株・後株の厳密な区別】
+入力された会社名の「株式会社」の位置（前株：株式会社〇〇 / 後株：〇〇株式会社）は、法人が異なるかを識別する決定的な要素です。
+有名企業の知名度に引っ張られず、入力された文字列の構造（前株・後株）と一致する正しい企業の公式サイトおよび会社概要を特定してください。
+
 {prompt_targets}
 
 1. "input_company": 入力された会社名。
-2. "correct_company_name": 情報から確認できる正式名称。
-3. "profile_url": 【会社概要ページ情報】のURLリストの中から、公式サイト内の「会社概要」や「企業情報」に最も該当するURLを1つ記載。なければnull。
+2. "correct_company_name": 情報から確認できる正式名称（入力された前株・後株の構造に合致するもの）。
+3. "profile_url": 【会社概要ページ候補】のURLリストの中から、指定された企業の公式サイト内の「会社概要」や「企業情報」に最も該当するURLを1つ記載。別法人のURLは絶対に選ばないこと。
 4. "details": 九州内（福岡,佐賀,長崎,熊本,大分,宮崎,鹿児島）の拠点・支店・営業所・事業所・店舗情報。
 【重要】公式情報に含まれる九州内の拠点や店舗（リフォーム事業部などの部門拠点も含む）を漏れなく抽出してください。
 [{"name": "拠点名称", "address": "住所", "url": "その情報を裏付けるURL"}]
@@ -158,8 +162,8 @@ def analyze_companies_batch(batch_data, gemini_key):
 # 3. Streamlit UI & 実行処理
 # ==========================================
 with st.form(key="batch_search_form"):
-    st.markdown("**会社名リストを入力（スプレッドシートからコピー＆ペースト可）**")
-    raw_input = st.text_area("", placeholder="株式会社〇〇\t福岡県\n株式会社△△", height=150)
+    st.markdown("**会社名リストを入力（1行に1社、前株・後株を正確に入力してください）**")
+    raw_input = st.text_area("", placeholder="株式会社ニデック\nアステラス製薬株式会社\n株式会社ニトリ", height=150)
     submit_button = st.form_submit_button("一括検索・分析を実行", type="primary")
 
 if submit_button:
@@ -169,19 +173,17 @@ if submit_button:
         lines = raw_input.strip().split("\n")
         company_list = []
         for line in lines:
-            parts = line.split("\t")
-            comp = parts[0].strip()
-            context = " ".join([p.strip() for p in parts[1:]]) if len(parts) > 1 else ""
-            if comp and comp not in [c["name"] for c in company_list]:
-                company_list.append({"name": comp, "context": context})
+            comp = line.strip()
+            if comp and comp not in company_list:
+                company_list.append(comp)
 
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         status_text.text("検索中...")
         fetched_data = []
-        for i, comp_info in enumerate(company_list):
-            fetched_data.append({"company": comp_info, **search_company_info(comp_info, tavily_api_key)})
+        for i, comp_name in enumerate(company_list):
+            fetched_data.append({"company_name": comp_name, **search_company_info(comp_name, tavily_api_key)})
             progress_bar.progress(((i + 1) / len(company_list)) * 0.5)
 
         status_text.text("AI分析中...")
@@ -196,8 +198,7 @@ if submit_button:
             progress_bar.progress(0.5 + ((i + len(chunk)) / len(fetched_data)) * 0.5)
 
         batch_results = []
-        for comp_info in company_list:
-            comp_name = comp_info["name"]
+        for comp_name in company_list:
             res = company_map.get(comp_name, {})
 
             correct_name = res.get("correct_company_name", comp_name)
