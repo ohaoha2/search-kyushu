@@ -22,7 +22,7 @@ if "result_cache" not in st.session_state:
     st.session_state.result_cache = {}
 
 # ==========================================
-# 1. 検索エンジンの実行関数
+# 1. 検索エンジンの実行関数（高速化版）
 # ==========================================
 def fetch_ddg_results(query: str):
     clean_kw = query.strip().replace('`', '')
@@ -31,7 +31,7 @@ def fetch_ddg_results(query: str):
     headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
-        res = requests.post(url, data=data, headers=headers, timeout=10)
+        res = requests.post(url, data=data, headers=headers, timeout=8)
         soup = BeautifulSoup(res.text, "html.parser")
         results = []
         rows = soup.find_all("tr")
@@ -51,20 +51,9 @@ def fetch_ddg_results(query: str):
         return []
 
 def search_multi_queries(keyword: str):
-    q1 = f'"{keyword}" 会社概要 拠点 支店 一覧'
-    q2 = f'"{keyword}" 九州 福岡 支店 営業所'
-    q3 = f'"{keyword}" 公式サイト コーポレート'
-    
-    queries = [q1, q2, q3]
-    all_results = []
-    seen_urls = set()
-    
-    for q in queries:
-        res_list = fetch_ddg_results(q)
-        for r in res_list:
-            if r['url'] not in seen_urls:
-                seen_urls.add(r['url'])
-                all_results.append(r)
+    # 検索回数を3回から1回に統合して爆速化
+    query = f'"{keyword}" 九州 支店 営業所 会社概要'
+    all_results = fetch_ddg_results(query)
                 
     if not all_results:
         return "", []
@@ -85,7 +74,7 @@ def safe_parse_json(text):
         raise
 
 # ==========================================
-# 3. 複数社を一括でAI分析する関数（バッチ処理・精度強化版）
+# 3. 複数社を一括でAI分析する関数（バッチ処理）
 # ==========================================
 def analyze_companies_batch(batch_data, gemini_key):
     client = genai.Client(api_key=gemini_key)
