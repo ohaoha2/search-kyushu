@@ -152,7 +152,7 @@ def analyze_companies_batch(batch_data, gemini_key):
 """
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash-lite",
             contents=template.replace("{prompt_targets}", prompt_targets),
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
