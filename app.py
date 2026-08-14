@@ -4,28 +4,48 @@ import os
 import re
 from google import genai
 from google.genai import types
+from duckduckgo_search import DDGS
 
-st.set_page_config(page_title="九州拠点リサーチ", page_icon="✨")
+st.set_page_config(page_title="九州拠点・DX営業リサーチ", page_icon="✨")
 
-st.title("✨ 九州拠点リサーチツール")
-st.write("会社名または住所からWeb検索で正確に特定し、アプローチキーワードを抽出します。")
+st.title("✨ 九州拠点・DX営業リサーチツール")
+st.write("会社名や住所からWeb検索（回数無制限・無料）で正確に特定し、DX営業代行のアプローチキーワードを抽出します。")
+
+# DuckDuckGoを使って無料でWeb検索を行う関数（回数制限なし）
+def search_web_info(query):
+    try:
+        with DDGS() as ddg:
+            # 上位3件の検索結果を取得してテキストにまとめる
+            results = [r for r in ddg.text(query, max_results=3)]
+            context = "\n".join([f"- タイトル: {r.get('title')}\n  内容: {r.get('body')}" for r in results])
+            return context if context else "検索結果が見つかりませんでした。"
+    except Exception as e:
+        return f"検索エラー: {e}"
 
 @st.cache_data(ttl=86400)
-def analyze_company(query, gemini_key):
+def analyze_company_with_search(query, gemini_key):
+    # 1. まずDuckDuckGoでWeb検索を実行して情報を集める
+    web_context = search_web_info(query)
+    
+    # 2. 集めた検索結果をGeminiに読ませて分析・判定させる（Geminiの検索ツールは使わないので429エラーが出ない）
     client = genai.Client(api_key=gemini_key)
     
     prompt = f"""
     あなたは企業の所在調査およびDX営業戦略のプロフェッショナルです。
     検索ターゲット（会社名、または住所）: "{query}"
     
+    以下の【Web検索結果】を参考にして、正確な企業名や拠点、九州拠点の有無を判定してください。
+    
+    【Web検索結果】
+    {web_context}
+    
     指示:
-    1. 必ずWeb上の最新情報を検索し、入力された情報（会社名、または住所）に該当する「正確な企業名や施設名」を突き止めてください。
-    2. 住所や会社名に紐づく実際の事業者を正確に特定してください。
-    3. その企業が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に実在の直営拠点を持っているかも調査してください。
-    4. 確実な証拠がある場合のみ "is_found": true とし、企業名・拠点名、正確な住所、URLを抽出してください。
-    5. 確証がない場合は "is_found": false にしてください。
-    6. "reasoning" は1〜2文で簡潔にまとめてください。
-    7. この企業へのDX営業代行アプローチで使えそうなキーワードや業界特性（10個程度）を "sales_keywords" の配列として抽出してください。
+    1. 検索結果を基に、入力された情報（会社名、または住所）に該当する「正確な企業名や施設名」を突き止めてください。近隣の無関係な有名施設（例：ヤマハのテストコースなど）と絶対に混同しないでください。
+    2. その企業が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に実在の直営拠点を持っているか調査してください。
+    3. 確実な証拠がある場合のみ "is_found": true とし、企業名・拠点名、正確な住所、URLを抽出してください。
+    4. 確証がない場合は "is_found": false にしてください。
+    5. "reasoning" は1〜2文で簡潔にまとめてください。
+    6. この企業へのDX営業代行アプローチで使えそうなキーワードや業界特性（10個程度）を "sales_keywords" の配列として抽出してください。
     
     必ず以下のJSONフォーマットのみで回答してください（Markdownのバッククォート ``` は使ず、純粋なJSON文字列だけで出力してください）。
     {{
@@ -38,12 +58,10 @@ def analyze_company(query, gemini_key):
     }}
     """
     
-    # Google検索（Grounding）を有効化し、実際のWebから正確な情報を引く
     response = client.models.generate_content(
-        model='gemini-3.5-flash',
+        model='gemini-1.5-flash',
         contents=prompt,
         config=types.GenerateContentConfig(
-            tools=[{'google_search': {}}],
             response_mime_type="application/json"
         ),
     )
@@ -68,9 +86,9 @@ if st.button("リサーチを実行", type="primary"):
             st.error("⚠️ サーバーのVariablesにAPIキー（GEMINI_API_KEY）が設定されていません。")
             st.stop()
 
-        with st.spinner(f"「{query}」をWeb検索と照合して正確に分析中..."):
+        with st.spinner(f"「{query}」をWeb検索して正確に分析中..."):
             try:
-                result = analyze_company(query, gemini_key)
+                result = analyze_company_with_search(query, gemini_key)
                 
                 # 結果表示
                 st.divider()
