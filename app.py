@@ -31,7 +31,7 @@ def fetch_ddg_results(query: str):
     headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
-        res = requests.post(url, data=data, headers=headers, timeout=10)
+        res = requests.post(url, data=data, headers=headers, timeout=3)
         soup = BeautifulSoup(res.text, "html.parser")
         results = []
         rows = soup.find_all("tr")
@@ -51,11 +51,11 @@ def fetch_ddg_results(query: str):
         return []
 
 def search_multi_queries(keyword: str):
-    q1 = f'"{keyword}" 会社概要 拠点 支店 一覧'
+    # 検索を2回に削減（公式サイト系 ＋ 九州拠点系）
+    q1 = f'"{keyword}" 会社概要 公式サイト'
     q2 = f'"{keyword}" 九州 福岡 支店 営業所'
-    q3 = f'"{keyword}" 公式サイト コーポレート'
     
-    queries = [q1, q2, q3]
+    queries = [q1, q2]
     all_results = []
     seen_urls = set()
     
@@ -85,7 +85,7 @@ def safe_parse_json(text):
         raise
 
 # ==========================================
-# 3. 複数社を一括でAI分析する関数（バッチ処理・精度強化版）
+# 3. 複数社を一括でAI分析する関数
 # ==========================================
 def analyze_companies_batch(batch_data, gemini_key):
     client = genai.Client(api_key=gemini_key)
@@ -109,7 +109,7 @@ def analyze_companies_batch(batch_data, gemini_key):
 4. "details": 九州内の確実な直営拠点ごとの詳細情報（名称, 住所, URL）のリスト（見つからない場合は空配列 []）
 5. "sales_keywords": 営業アプローチ用のキーワード10個のリスト
 
-必ず以下のJSON配列フォーマットのみで回答してください（マークダウンの ```json や ``` で囲んでも構いません）：
+必ず以下のJSON配列フォーマットのみで回答してください：
 [
     {
         "company": "会社名",
@@ -186,7 +186,6 @@ if submit_button:
             progress_bar.progress((i + 1) / max(len(to_fetch), 1) * 0.5)
 
         chunk_size = 10
-        analyzed_results = []
         
         if fetched_data:
             status_text.text("🤖 AIによる一括分析を実行中...")
