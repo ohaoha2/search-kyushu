@@ -5,13 +5,13 @@ import re
 from google import genai
 from google.genai import types
 
-st.set_page_config(page_title="九州拠点・DX営業リサーチ（検索版）", page_icon="✨")
+st.set_page_config(page_title="九州拠点・DX営業リサーチ", page_icon="✨")
 
-st.title("✨ 九州拠点・DX営業リサーチツール（Google検索連携）")
-st.write("Google公式の検索機能（Grounding）を用いて、最新のWeb情報を基に正確にリサーチします。")
+st.title("✨ 九州拠点・DX営業リサーチツール（無料枠・Google検索連携）")
+st.write("Gemini 2.5 Flashの無料枠を活用し、Google検索で正確な情報を基にリサーチします。")
 
 @st.cache_data(ttl=86400)
-def analyze_company_with_google_search(query, gemini_key):
+def analyze_company_with_free_search(query, gemini_key):
     client = genai.Client(api_key=gemini_key)
     
     prompt = f"""
@@ -20,9 +20,9 @@ def analyze_company_with_google_search(query, gemini_key):
     
     指示:
     1. Google検索を用いて最新のWeb情報を確認し、入力された情報（会社名、または住所）に該当する「正確な企業名や施設名」を突き止めてください。
-    2. 近隣の無関係な有名施設（例：ヤマハのテストコースなど）と絶対に混同せず、その住所や会社名に紐づく実際の事業者を正確に特定してください。
+    2. 住所や会社名に紐づく実際の事業者を正確に特定してください。
     3. その企業が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に実在の直営拠点を持っているか調査してください。
-    4. 確実な証拠がある場合のみ "is_found": true とし、企業名・拠点名、正確な住所、実際のURLを抽出してください。
+    4. 確実な証拠がある場合のみ "is_found": true とし、企業名・拠点名、正確な住所、URLを抽出してください。
     5. 確証がない場合は "is_found": false にしてください。
     6. "reasoning" は1〜2文で簡潔にまとめてください。
     7. この企業へのDX営業代行アプローチで使えそうなキーワードや業界特性（10個程度）を "sales_keywords" の配列として抽出してください。
@@ -38,9 +38,9 @@ def analyze_company_with_google_search(query, gemini_key):
     }}
     """
     
-    # Google公式の検索ツール（Grounding）を有効化
+    # 無料枠でGoogle検索が使える gemini-2.5-flash を指定
     response = client.models.generate_content(
-        model='gemini-2.5-flash', # 安定して検索ツールが使えるモデル
+        model='gemini-2.5-flash',
         contents=prompt,
         config=types.GenerateContentConfig(
             tools=[{'google_search': {}}],
@@ -58,7 +58,7 @@ def analyze_company_with_google_search(query, gemini_key):
 # 入力フォーム
 query = st.text_input("会社名、または住所を入力", placeholder="例: 株式会社ティーエフケー、静岡県袋井市宇刈137")
 
-if st.button("Google検索でリサーチを実行", type="primary"):
+if st.button("リサーチを実行", type="primary"):
     if not query:
         st.warning("会社名または住所を入力してください。")
     else:
@@ -70,11 +70,11 @@ if st.button("Google検索でリサーチを実行", type="primary"):
 
         with st.spinner(f"「{query}」をGoogle検索で正確に調査中..."):
             try:
-                result = analyze_company_with_google_search(query, gemini_key)
+                result = analyze_company_with_free_search(query, gemini_key)
                 
                 st.divider()
                 if result.get('is_found'):
-                    st.success(f"⭕ 該当する企業・拠点が確認されました！")
+                    st.success(f"⭕ 該当する企業・拠点が正確に確認されました！")
                     st.info(f"**判定理由:** {result.get('reasoning')}")
                     
                     keywords = result.get('sales_keywords', [])
@@ -90,7 +90,7 @@ if st.button("Google検索でリサーチを実行", type="primary"):
                             st.write(f"住所: {d.get('address')}")
                             st.markdown(f"[詳細リンク]({d.get('url')})")
                 else:
-                    st.error(f"❌ 確実な情報は確認されませんでした。")
+                    st.error(f"❌ 確実な九州拠点は確認されませんでした。")
                     st.write(f"**判定理由:** {result.get('reasoning')}")
                     
                     keywords = result.get('sales_keywords', [])
@@ -100,4 +100,4 @@ if st.button("Google検索でリサーチを実行", type="primary"):
                         st.markdown(keywords_md)
                         
             except Exception as e:
-                st.error(f"エラーが発生しました（※無料枠の制限の場合はGoogle AI Studioで従量課金の有効化が必要です）: {e}")
+                st.error(f"エラーが発生しました: {e}")
