@@ -18,17 +18,35 @@ if "search_history" not in st.session_state:
     st.session_state.search_history = []
 
 if "result_cache" not in st.session_state:
-    st.session_state.result_cache = {}  # 検索結果・分析結果を保存するキャッシュ
+    st.session_state.result_cache = {}
 
 # ==========================================
-# 1. DuckDuckGo Lite による検索関数
+# 1. キーワードの自動補正（もっともらしい企業の推測）
 # ==========================================
-def search_ddg_lite(keyword: str):
-    clean_kw = re.sub(r'[・"（）()]', ' ', keyword).strip()
-    if clean_kw.replace("-", "").isdigit():
-        query = f"{clean_kw} 住所"
-    else:
-        query = f'"{clean_kw}" 九州 福岡 拠点 工場 支社'
+def expand_query_with_ai(keyword: str, gemini_key):
+    """曖昧なキーワードから、世間で一般的な正式企業名や本社を推測する"""
+    client = genai.Client(api_key=gemini_key)
+    prompt = f"""
+    ユーザーが入力したキーワード: "{keyword}"
+    このキーワードが指す、世間一般で最も広く知られている「正式な企業名」や「代表的なブランド・本社の特徴（例：業種や都道府県）」を1行で簡潔に教えてください。
+    余計な挨拶や解説は一切省き、検索に使えそうなキーワードの組み合わせのみを出力してください。
+    例: 「さわやか」→「炭焼きレストランさわやか 静岡 ハンバーグ」
+    """
+    try:
+        response = client.models.generate_content(
+            model='gemini-3.5-flash-lite',
+            contents=prompt,
+        )
+        return response.text.strip()
+    except:
+        return keyword  # 失敗した場合は元のキーワードを使う
+
+# ==========================================
+# 2. DuckDuckGo Lite による検索関数
+# ==========================================
+def search_ddg_lite(expanded_query: str):
+    clean_kw = re.sub(r'[・"（）()]', ' ', expanded_query).strip()
+    query = f'"{clean_kw}" 九州 福岡 拠点 工場 支社'
 
     url = "https://lite.duckduckgo.com/lite/"
     data = {'q': query}
@@ -73,7 +91,7 @@ def search_ddg_lite(keyword: str):
         return None, f"検索エラー: {str(e)}"
 
 # ==========================================
-# 2. JSONパースの安全装置付き・分析関数
+# 3. JSONパースの安全装置付き・分析関数
 # ==========================================
 def safe_parse_json(text):
     try:
@@ -97,20 +115,18 @@ def analyze_company_with_ai(query, web_context, gemini_key):
     {web_context}
 
     指示:
-    1. 入力された検索ターゲット（"{query}"）と一致する正式な企業を対象としてください。文字が部分的に似ているだけの「まったく別の企業・別法人」とは絶対に混同しないでください。
+    1. 【最重要・同名異法人の厳禁】入力された検索ターゲット（"{query}"）が特定のブランド名や企業名である場合、文字面が一致するだけの「全く無関係な同名企業・別法人（例：別業種のローカル企業など）」を対象に含めては絶対にいけません。
     2. その企業が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に実在の直営拠点（支店、営業所、工場など）を持っているか調査してください。
-    3. もし過去に存在したとしても、すでに閉業、閉鎖、廃止、移転完了している拠点は「存在しない（is_found: false）」と判定してください。
+    3. すでに閉業、閉鎖、廃止、移転完了している拠点は「存在しない（is_found: false）」と判定してください。
     4. 確証がある場合は "is_found": true とし、企業名・拠点名、正確な住所や地域、URLを抽出してください。
-    5. "reasoning" には、「検索結果に表示された〜」「別の企業が〜」といった、検索結果や他社との比較に関する言及は絶対に含めないでください。単に、その企業が九州に実在の拠点を持っているかどうかという「事実」のみを1〜2文でシンプルに述べてください。**
+    5. "reasoning" には、検索結果や他社との比較に関するメタな解説やツッコミは含めず、九州拠点の有無や閉業に関する事実のみを1〜2文でシンプルに述べてください。
     6. この企業へのDX営業代行アプローチで、相手が食いつきそうなフックキーワード（10個）を "sales_keywords" の配列として抽出してください。
 
-    必ず以下のJSONフォーマットのみで回答してください（Markdownのバッククォートなどは一切使わず、純粋なJSON文字列だけで出力してください）。
+    必ず以下のJSONフォーマットのみで回答してください：
     {{
-        "is_found": true,
+        "is_found": false,
         "reasoning": "1〜2文の簡潔な判定理由",
-        "details": [
-            {{"name": "企業名・拠点名", "address": "住所・地域", "url": "URL"}}
-        ],
+        "details": [],
         "sales_keywords": ["キーワード1", "キーワード2", "キーワード3", "キーワード4", "キーワード5", "キーワード6", "キーワード7", "キーワード8", "キーワード9", "キーワード10"]
     }}
     """
@@ -126,7 +142,7 @@ def analyze_company_with_ai(query, web_context, gemini_key):
     return safe_parse_json(response.text.strip())
 
 # ==========================================
-# 3. Streamlit UI 構築（履歴 ＆ キャッシュ対応）
+# 4. Streamlit UI 構築
 # ==========================================
 
 default_query = ""
@@ -144,18 +160,14 @@ with st.form(key="search_form"):
 
 if submit_button:
     if not query:
-        st.warning("会社名義、住所等を入力してください。")
+        st.warning("会社名、住所等を入力してください。")
     else:
-        # 履歴への追加処理
         if query in st.session_state.search_history:
             st.session_state.search_history.remove(query)
         st.session_state.search_history.insert(0, query)
         if len(st.session_state.search_history) > 10:
             st.session_state.search_history.pop()
 
-        # ==========================================
-        # ⚡ キャッシュチェック（すでに調べた企業ならAPIを使わない）
-        # ==========================================
         if query in st.session_state.result_cache:
             st.info("⚡ キャッシュ（保存されたデータ）から高速表示しています（API消費ゼロ）")
             cached_data = st.session_state.result_cache[query]
@@ -167,8 +179,12 @@ if submit_button:
                 st.error("⚠️ サーバーのVariablesにAPIキー（GEMINI_API_KEY）が設定されていません。")
                 st.stop()
 
-            with st.spinner(f"「{query}」を検索中..."):
-                web_context, err = search_ddg_lite(query)
+            with st.spinner(f"「{query}」を最適化して検索中..."):
+                # 1. 曖昧なキーワードをAIが補正
+                expanded_query = expand_query_with_ai(query, gemini_key)
+                
+                # 2. 補正されたキーワードでWeb検索
+                web_context, err = search_ddg_lite(expanded_query)
                 
                 if err:
                     st.error(err)
@@ -177,7 +193,6 @@ if submit_button:
             with st.spinner("分析中..."):
                 try:
                     result = analyze_company_with_ai(query, web_context, gemini_key)
-                    # 次回のためにキャッシュへ保存
                     st.session_state.result_cache[query] = {
                         "web_context": web_context,
                         "result": result
