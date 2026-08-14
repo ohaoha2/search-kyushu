@@ -30,7 +30,13 @@ def fetch_ddg_results(query: str):
     clean_kw = query.strip().replace('`', '')
     url = "https://lite.duckduckgo.com/lite/"
     data = {'q': clean_kw}
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://duckduckgo.com/",
+        "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Upgrade-Insecure-Requests": "1"
+    }
     try:
         # ブロック回避のための待機（スレッド数が少ないため許容範囲です）
         time.sleep(0.5)
