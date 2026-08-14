@@ -8,7 +8,7 @@ from google.genai import types
 st.set_page_config(page_title="九州拠点チェッカー（無料・高精度）", page_icon="✨")
 
 st.title("九州拠点チェッカー")
-st.write("九州拠点があるかどうかのチェックと、営業キーワードをピックアップします。")
+st.write("九州拠点があるかどうかのチェックと、営業キーワードを提案します。")
 
 @st.cache_data(ttl=86400)
 def analyze_company(company_name, gemini_key):
