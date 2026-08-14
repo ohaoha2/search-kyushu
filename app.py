@@ -224,7 +224,7 @@ JSONのみ返してください。
     try:
         # 【修正】実在する安定モデルへ変更
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash-lite",
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
