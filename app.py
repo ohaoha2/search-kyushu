@@ -8,7 +8,6 @@ from google.genai import types
 st.set_page_config(page_title="九州拠点・DX営業リサーチ", page_icon="✨")
 
 st.title("✨ 九州拠点・DX営業リサーチツール（無料枠・Google検索連携）")
-st.write("Gemini 2.5 Flashの無料枠を活用し、Google検索で正確な情報を基にリサーチします。")
 
 @st.cache_data(ttl=86400)
 def analyze_company_with_free_search(query, gemini_key):
@@ -40,7 +39,7 @@ def analyze_company_with_free_search(query, gemini_key):
     
     # 無料枠でGoogle検索が使える gemini-2.5-flash を指定
     response = client.models.generate_content(
-        model='gemini-2.5-flash',
+        model='gemini-3-flash',
         contents=prompt,
         config=types.GenerateContentConfig(
             tools=[{'google_search': {}}],
