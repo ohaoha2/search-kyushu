@@ -3,13 +3,15 @@ import json
 import os
 import re
 import requests
+import pandas as pd
 from bs4 import BeautifulSoup
 from google import genai
 from google.genai import types
 
-st.set_page_config(page_title="九州拠点検索", page_icon="✨")
+st.set_page_config(page_title="九州拠点一括検索ツール", page_icon="✨", layout="wide")
 
-st.title("九州拠点検索・フックキーワード提案ツール")
+st.title("✨ 九州拠点一括検索・フックキーワード提案ツール")
+st.markdown("スプレッドシートなどから会社名をコピーし、下のテキストエリアに貼り付けて一括検索してください。")
 
 # ==========================================
 # 0. セッションステート初期化
@@ -20,7 +22,7 @@ if "result_cache" not in st.session_state:
     st.session_state.result_cache = {}
 
 # ==========================================
-# 1. 検索エンジンの実行関数（1回分）
+# 1. 検索エンジンの実行関数
 # ==========================================
 def fetch_ddg_results(query: str):
     clean_kw = query.strip().replace('`', '')
@@ -48,16 +50,12 @@ def fetch_ddg_results(query: str):
     except:
         return []
 
-# ==========================================
-# 2. マルチクエリによる網羅的検索（検索件数大幅増量）
-# ==========================================
 def search_multi_queries(keyword: str):
-    # ① 全国の会社概要・拠点一覧を狙うクエリ
     q1 = f'"{keyword}" 会社概要 拠点 支店 一覧'
-    # ② 九州・福岡の拠点・営業所をピンポイントで狙うクエリ（法人名完全一致なので別会社は拾いません）
     q2 = f'"{keyword}" 九州 福岡 支店 営業所'
+    q3 = f'"{keyword}" 公式サイト コーポレート'
     
-    queries = [q1, q2]
+    queries = [q1, q2, q3]
     all_results = []
     seen_urls = set()
     
@@ -69,152 +67,236 @@ def search_multi_queries(keyword: str):
                 all_results.append(r)
                 
     if not all_results:
-        return None, "検索結果を取得できませんでした。", queries
+        return "", []
         
-    # 最大25件まで結合してコンテキストを作成
     context = "\n".join([f"- タイトル: {r['title']}\n  内容: {r['snippet']}\n  URL: {r['url']}" for r in all_results[:25]])
-    return context, None, queries
+    return context, all_results
 
 # ==========================================
-# 3. JSONパース安全装置
+# 2. JSONパース安全装置
 # ==========================================
 def safe_parse_json(text):
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         text = re.sub(r"```json|```", "", text).strip()
-        match = re.search(r"\{.*\}", text, re.DOTALL)
+        match = re.search(r"\[.*\]|\{.*\}", text, re.DOTALL)
         if match: return json.loads(match.group(0))
         raise
 
 # ==========================================
-# 4. 分析関数
+# 3. 複数社を一括でAI分析する関数（バッチ処理）
 # ==========================================
-def analyze_company_with_ai(query, web_context, gemini_key):
+def analyze_companies_batch(batch_data, gemini_key):
     client = genai.Client(api_key=gemini_key)
+    
+    prompt_targets = ""
+    for i, item in enumerate(batch_data):
+        prompt_targets += f"\n=== 対象企業 {i+1}: {item['company']} ===\n【検索結果】\n{item['context']}\n"
+
     prompt = f"""
-    あなたは企業の所在調査のプロフェッショナルです。
-    ユーザーが入力した正確な企業名: "{query}"
+あなたは企業の所在調査のプロフェッショナルです。
+以下の複数の企業について、それぞれ提供された検索結果を基に調査し、結果を必ず【JSONの配列（リスト）】で返してください。
 
-    【取得した大量のWeb検索結果（最大25件）】
-    {web_context}
+{prompt_targets}
 
-    指示:
-    1. 検索結果から対象企業の「公式HP」のURLを特定し、"official_url" に格納（見つからない場合は null）。
-    2. 入力された企業が九州地方（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に支店、営業所、工場、グループ拠点等の直営拠点を持っているかを徹底的に調査してください。少しでも九州における拠点や事業展開（福岡支店など）が確認できる場合は、必ず "is_found": true としてください。
-    3. "reasoning" には、確認できた九州の拠点名（例: 福岡支店など）を含めて簡潔な判定理由を記載してください。
-    4. 営業アプローチで有効なフックキーワードを "sales_keywords" に10個抽出してください。
-    5. 九州内の拠点ごとの詳細情報（名称、住所、詳細URL）を "details" リストに具体的にまとめてください。
+各企業ごとの共通指示:
+1. "company": 入力された会社名をそのまま格納してください。
+2. "official_url": 公式サイトのコーポレートサイトURL（Wikipedia、求人サイト、ニュースサイトは除外。見つからない場合は null）
+3. "is_found": 九州地方（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に支店、営業所、工場等の直営拠点があれば true、なければ false
+4. "details": 九州内の拠点ごとの詳細情報（名称, 住所, URL）のリスト（見つからない場合は空配列 []）
+5. "sales_keywords": 営業アプローチ用のキーワード10個のリスト
 
-    必ず以下のJSONフォーマットのみで回答してください：
+必ず以下のJSON配列フォーマットのみで回答してください（マークダウンの ```json や ``` で囲んでも構いません）：
+[
     {{
-        "is_found": trueまたはfalse,
-        "official_url": "公式サイトのURLまたはnull",
-        "reasoning": "1〜2文の簡潔な判定理由",
-        "details": [
-            {{"name": "企業名・拠点名", "address": "住所・地域", "url": "URL"}}
-        ],
-        "sales_keywords": ["キーワード1", "キーワード2", "キーワード3", "キーワード4", "キーワード5", "キーワード6", "キーワード7", "キーワード8", "キーワード9", "キーワード10"]
+        "company": "会社名",
+        "is_found": true,
+        "official_url": "https://...",
+        "details": [{{"name": "...", "address": "...", "url": "..."}}],
+        "sales_keywords": ["キーワード1", "キーワード2", ...]
     }}
+]
     """
-    response = client.models.generate_content(
-        model='gemini-3.5-flash-lite',
-        contents=prompt,
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
-    )
-    return safe_parse_json(response.text.strip())
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+        return safe_parse_json(response.text.strip())
+    except Exception as e:
+        st.error(f"AI分析バッチ処理エラー: {str(e)}")
+        return []
 
 # ==========================================
-# 5. Streamlit UI 構築
+# 4. Streamlit UI 構築
 # ==========================================
-default_query = ""
-if st.session_state.search_history:
-    selected_history = st.selectbox(
-        "🕒 過去の検索履歴から選ぶ",
-        ["-- 履歴から選択する --"] + st.session_state.search_history
+with st.form(key="batch_search_form"):
+    raw_input = st.text_area(
+        "📋 会社名リストを入力（スプレッドシートからそのまま貼り付け可能）",
+        placeholder="株式会社〇〇\n株式会社△△",
+        height=150
     )
-    if selected_history != "-- 履歴から選択する --":
-        default_query = selected_history
-
-with st.form(key="search_form"):
-    query = st.text_input("会社名、キーワード等を入力", value=default_query, placeholder="例: 株式会社ニデック")
-    submit_button = st.form_submit_button("検索", type="primary")
+    submit_button = st.form_submit_button("一括検索・分析を実行", type="primary")
 
 if submit_button:
-    if not query:
-        st.warning("会社名、キーワード等を入力してください。")
+    if not raw_input.strip():
+        st.warning("会社名を入力してください。")
     else:
-        if query in st.session_state.search_history:
-            st.session_state.search_history.remove(query)
-        st.session_state.search_history.insert(0, query)
-        if len(st.session_state.search_history) > 10:
-            st.session_state.search_history.pop()
+        lines = raw_input.strip().split("\n")
+        company_list = []
+        for line in lines:
+            parts = line.split("\t")
+            comp = parts[0].strip()
+            if comp and comp not in company_list:
+                company_list.append(comp)
 
-        if query in st.session_state.result_cache:
-            st.info("⚡ キャッシュから高速表示しています（API消費ゼロ）")
-            cached_data = st.session_state.result_cache[query]
-            web_context = cached_data["web_context"]
-            used_queries = cached_data.get("used_queries", [])
-            result = cached_data["result"]
-        else:
-            gemini_key = os.getenv("GEMINI_API_KEY")
-            if not gemini_key:
-                st.error("⚠️ サーバーのVariablesにAPIキー（GEMINI_API_KEY）が設定されていません。")
-                st.stop()
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if not gemini_key:
+            st.error("⚠️ サーバーのVariablesにAPIキー（GEMINI_API_KEY）が設定されていません。")
+            st.stop()
 
-            with st.spinner(f"「{query}」の情報を複数クエリで大量検索中..."):
-                web_context, err, used_queries = search_multi_queries(query)
+        batch_results = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # キャッシュ未登録の会社をピックアップ、登録済みのものは再利用
+        to_fetch = []
+        company_map = {}
+
+        for comp in company_list:
+            if comp in st.session_state.result_cache:
+                company_map[comp] = st.session_state.result_cache[comp]
+            else:
+                to_fetch.append(comp)
+
+        status_text.text("🌐 Web検索を実行中...")
+        fetched_data = []
+        for i, comp in enumerate(to_fetch):
+            context, raw_results = search_multi_queries(comp)
+            fetched_data.append({
+                "company": comp,
+                "context": context,
+                "raw_results": raw_results
+            })
+            progress_bar.progress((i + 1) / max(len(to_fetch), 1) * 0.5)
+
+        # 10社ずつに分割して一括AI分析（バッチ処理）
+        chunk_size = 10
+        analyzed_results = []
+        
+        if fetched_data:
+            status_text.text("🤖 AIによる一括分析を実行中...")
+            for i in range(0, len(fetched_data), chunk_size):
+                chunk = fetched_data[i:i+chunk_size]
+                res_list = analyze_companies_batch(chunk, gemini_key)
                 
-                if err:
-                    st.error(err)
-                    st.stop()
+                # リスト形式で返ってきた結果をマッピング
+                if isinstance(res_list, list):
+                    for r in res_list:
+                        comp_name = r.get("company")
+                        # フォールバック処理（公式サイトの補完）
+                        if not r.get('official_url') or r.get('official_url') in ["null", ""]:
+                            for item in chunk:
+                                if item['company'] == comp_name and item['raw_results']:
+                                    for rr in item['raw_results']:
+                                        url_lower = rr['url'].lower()
+                                        if not any(x in url_lower for x in ["wikipedia", "job", "wantedly", "en-japan", "rikunabi", "mynavi", "yahoo", "google"]):
+                                            r['official_url'] = rr['url']
+                                            break
+                                    if not r.get('official_url') and item['raw_results']:
+                                        r['official_url'] = item['raw_results'][0]['url']
+                        
+                        company_map[comp_name] = r
+                        st.session_state.result_cache[comp_name] = r
+                
+                progress_bar.progress(0.5 + ((i + len(chunk)) / len(fetched_data)) * 0.5)
 
-            with st.spinner("分析中..."):
-                try:
-                    result = analyze_company_with_ai(query, web_context, gemini_key)
-                    st.session_state.result_cache[query] = {
-                        "web_context": web_context,
-                        "used_queries": used_queries,
-                        "result": result
-                    }
-                except Exception as e:
-                    st.error(f"分析エラーが発生しました: {e}")
-                    st.stop()
+        # 最終的な表示用データの構築
+        for comp in company_list:
+            res = company_map.get(comp, {
+                "is_found": False,
+                "official_url": None,
+                "details": [],
+                "sales_keywords": []
+            })
 
-        with st.expander("🔍 取得したWeb検索の生データ (デバッグ用・マルチクエリ結果)"):
-            st.markdown(f"**実際に実行した検索クエリ:**\n- `{used_queries[0]}`\n- `{used_queries[1]}`")
-            st.text(web_context)
-        
-        st.divider()
-        
-        official_url = result.get('official_url')
-        if official_url and official_url != "null":
-            st.markdown(f"### 🌐 公式サイト\n[{official_url}]({official_url})")
-            st.divider()
+            is_found_str = "⭕ 九州拠点あり" if res.get('is_found') else "❌ 拠点なし"
+            official_url = res.get('official_url')
+            if not official_url or official_url in ["null", ""]: 
+                official_url = None
+            
+            details_summary = ", ".join([f"{d.get('name')} ({d.get('address')})" for d in res.get('details', [])])
+            keywords_summary = ", ".join(res.get('sales_keywords', []))
 
-        if result.get('is_found'):
-            st.success(f"⭕ 九州拠点が確認されました。")
-            st.info(f"**判定理由:** {result.get('reasoning')}")
+            batch_results.append({
+                "会社名": comp,
+                "判定": is_found_str,
+                "公式サイト": official_url,
+                "確認された拠点": details_summary if details_summary else "なし",
+                "フックキーワード": keywords_summary,
+                "_raw_details": res.get('details', []),
+                "_raw_keywords": res.get('sales_keywords', [])
+            })
+
+        progress_bar.progress(1.0)
+        status_text.text("✅ すべての処理が完了しました！")
+        st.session_state["batch_results"] = batch_results
+
+# ==========================================
+# 5. 一覧表示 ＆ ハイパーリンク設定 ＆ コピー機能
+# ==========================================
+if "batch_results" in st.session_state and st.session_state["batch_results"]:
+    results = st.session_state["batch_results"]
+    
+    st.divider()
+    st.subheader("📊 検索・分析結果一覧")
+
+    df_display = pd.DataFrame(results)[["会社名", "判定", "公式サイト", "確認された拠点", "フックキーワード"]]
+    
+    st.dataframe(
+        df_display,
+        column_config={
+            "公式サイト": st.column_config.LinkColumn(
+                "公式サイト",
+                help="クリックすると公式HPが開きます"
+            )
+        },
+        use_container_width=True
+    )
+
+    tsv_text = df_display.to_csv(sep="\t", index=False)
+    with st.expander("📋 スプレッドシート用の一括コピー（タブ区切りテキスト）"):
+        st.markdown("下の枠内のテキストをコピーして、スプレッドシートにそのまま貼り付けることができます。")
+        st.code(tsv_text, language="text")
+
+    csv_data = df_display.to_csv(index=False).encode('utf-8-sig')
+    st.download_button(
+        label="📥 結果をCSVでダウンロード",
+        data=csv_data,
+        file_name="kyushu_corporate_search_results.csv",
+        mime="csv",
+        type="primary"
+    )
+
+    st.divider()
+    st.subheader("📍 各社詳細・カード表示")
+    
+    for r in results:
+        with st.expander(f"{r['会社名']} ── 【 {r['判定']} 】"):
+            if r['公式サイト']:
+                st.markdown(f"**🌐 公式サイト:** [{r['公式サイト']}]({r['公式サイト']})")
             
-            keywords = result.get('sales_keywords', [])
-            if keywords:
-                st.markdown("### 🔑 フックキーワード")
-                keywords_md = " ".join([f"`{kw}`" for kw in keywords])
-                st.markdown(keywords_md)
-            
-            st.markdown("### 📍 企業・拠点詳細")
-            for d in result.get('details', []):
-                with st.container(border=True):
-                    st.markdown(f"**{d.get('name')}**")
-                    st.write(f"住所: {d.get('address')}")
-                    if d.get('url'):
-                        st.markdown(f"[詳細リンク]({d.get('url')})")
-        else:
-            st.error(f"❌ 九州拠点は確認されませんでした。")
-            st.write(f"**判定理由:** {result.get('reasoning')}")
-            
-            keywords = result.get('sales_keywords', [])
-            if keywords:
-                st.markdown("### 🔑 フックキーワード")
-                keywords_md = " ".join([f"`{kw}`" for kw in keywords])
-                st.markdown(keywords_md)
+            if r['_raw_keywords']:
+                st.markdown("**🔑 フックキーワード:**")
+                st.markdown(" ".join([f"`{kw}`" for kw in r['_raw_keywords']]))
+                
+            if r['_raw_details']:
+                st.markdown("**📍 拠点詳細:**")
+                for d in r['_raw_details']:
+                    with st.container(border=True):
+                        st.markdown(f"**{d.get('name')}**")
+                        st.write(f"住所: {d.get('address')}")
+                        if d.get('url') and d.get('url') != "null":
+                            st.markdown(f"[詳細リンク]({d.get('url')})")
