@@ -5,10 +5,10 @@ import re
 from google import genai
 from google.genai import types
 
-st.set_page_config(page_title="九州拠点・キーワードリサーチ", page_icon="✨")
+st.set_page_config(page_title="九州拠点リサーチ", page_icon="✨")
 
-st.title("✨ 九州拠点・キーワードリサーチツール")
-st.write("会社名または住所から九州拠点の有無と、アプローチキーワード（約10個）を抽出します。")
+st.title("✨ 九州拠点リサーチツール")
+st.write("会社名または住所からWeb検索で正確に特定し、アプローチキーワードを抽出します。")
 
 @st.cache_data(ttl=86400)
 def analyze_company(query, gemini_key):
@@ -16,17 +16,17 @@ def analyze_company(query, gemini_key):
     
     prompt = f"""
     あなたは企業の所在調査およびDX営業戦略のプロフェッショナルです。
-    検索ターゲット（会社名、または住所など）: "{query}"
+    検索ターゲット（会社名、または住所）: "{query}"
     
     指示:
-    1. 入力された情報（会社名、または住所）をもとに、そこに所在する正確な企業名や施設名（例：住所の場合はその番地にある実際の企業、会社名の場合はその拠点）を特定してください。
-    2. 住所が入力された場合、その場所にある最も主要な企業・施設を正確に突き止めてください。近隣の有名な別施設と混同せず、実際の事業者を正確に判定してください。
-    3. その企業が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に実在の直営拠点を持っているかも併せて調査してください。
-    4. 確実な証拠がある場合のみ "is_found": true とし、企業名・拠点名、住所、URLを抽出してください。
+    1. 必ずWeb上の最新情報を検索し、入力された情報（会社名、または住所）に該当する「正確な企業名や施設名」を突き止めてください。
+    2. 住所や会社名に紐づく実際の事業者を正確に特定してください。
+    3. その企業が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に実在の直営拠点を持っているかも調査してください。
+    4. 確実な証拠がある場合のみ "is_found": true とし、企業名・拠点名、正確な住所、URLを抽出してください。
     5. 確証がない場合は "is_found": false にしてください。
     6. "reasoning" は1〜2文で簡潔にまとめてください。
     7. この企業へのDX営業代行アプローチで使えそうなキーワードや業界特性（10個程度）を "sales_keywords" の配列として抽出してください。
-
+    
     必ず以下のJSONフォーマットのみで回答してください（Markdownのバッククォート ``` は使ず、純粋なJSON文字列だけで出力してください）。
     {{
         "is_found": true,
@@ -38,10 +38,12 @@ def analyze_company(query, gemini_key):
     }}
     """
     
+    # Google検索（Grounding）を有効化し、実際のWebから正確な情報を引く
     response = client.models.generate_content(
-        model='gemini-3.5-flash',
+        model='gemini-2.5-flash',
         contents=prompt,
         config=types.GenerateContentConfig(
+            tools=[{'google_search': {}}],
             response_mime_type="application/json"
         ),
     )
@@ -53,8 +55,8 @@ def analyze_company(query, gemini_key):
         
     return json.loads(raw_text.strip())
 
-# 入力フォームを「会社名または住所」に対応
-query = st.text_input("会社名、または住所を入力", placeholder="例: 株式会社さわやか、福岡市中央区...等")
+# 入力フォーム
+query = st.text_input("会社名、または住所を入力", placeholder="例: 株式会社ティーエフケー、静岡県袋井市宇刈137")
 
 if st.button("リサーチを実行", type="primary"):
     if not query:
@@ -66,34 +68,33 @@ if st.button("リサーチを実行", type="primary"):
             st.error("⚠️ サーバーのVariablesにAPIキー（GEMINI_API_KEY）が設定されていません。")
             st.stop()
 
-        with st.spinner(f"「{query}」を分析中..."):
+        with st.spinner(f"「{query}」をWeb検索と照合して正確に分析中..."):
             try:
                 result = analyze_company(query, gemini_key)
                 
                 # 結果表示
                 st.divider()
                 if result.get('is_found'):
-                    st.success(f"⭕ 該当する九州の拠点・企業が確認されました！")
+                    st.success(f"⭕ 該当する企業・拠点が正確に確認されました！")
                     st.info(f"**判定理由:** {result.get('reasoning')}")
                     
                     # 営業キーワードの表示（約10個）
                     keywords = result.get('sales_keywords', [])
                     if keywords:
-                        st.markdown("### 🔑 キーワード")
+                        st.markdown("### 🔑 DX営業アプローチキーワード")
                         keywords_md = " ".join([f"`{kw}`" for kw in keywords])
                         st.markdown(keywords_md)
                     
-                    st.markdown("### 📍 拠点・企業詳細")
+                    st.markdown("### 📍 企業・拠点詳細")
                     for d in result.get('details', []):
                         with st.container(border=True):
                             st.markdown(f"**{d.get('name')}**")
                             st.write(f"住所: {d.get('address')}")
                             st.markdown(f"[詳細リンク]({d.get('url')})")
                 else:
-                    st.error(f"❌ 九州拠点は確認されませんでした。")
+                    st.error(f"❌ 正確な情報が確認されませんでした。")
                     st.write(f"**判定理由:** {result.get('reasoning')}")
                     
-                    # キーワード表示
                     keywords = result.get('sales_keywords', [])
                     if keywords:
                         st.markdown("### 🔑 DX営業アプローチキーワード（参考）")
