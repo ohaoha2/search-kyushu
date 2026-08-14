@@ -106,7 +106,7 @@ def analyze_companies_batch(batch_data, gemini_key):
    - 単なる「施工実績」「納入実績」「代理店」「パートナー企業」「別法人のグループ会社」の言及である場合
    - すでに閉鎖・廃止された拠点である場合
    - details が空配列 [] の場合
-5. "sales_keywords": 営業アプローチ用のキーワード10個のリスト
+5. "sales_keywords": DX営業代行で相手に刺さるフックキーワード10個のリスト
 
 必ず以下のJSON配列フォーマットのみで回答してください：
 [
@@ -228,7 +228,7 @@ if submit_button:
                 "会社名": comp,
                 "判定": is_found_str,
                 "公式サイト": official_url,
-                "確認された拠点": details_summary if details_summary else "なし",
+                "九州拠点": details_summary if details_summary else "なし",
                 "フックキーワード": keywords_summary,
                 "_raw_details": res.get('details', []),
                 "_raw_keywords": res.get('sales_keywords', [])
