@@ -7,6 +7,7 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from google import genai
 from google.genai import types
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 st.set_page_config(page_title="九州拠点一括検索ツール", page_icon="✨", layout="wide")
 
@@ -22,7 +23,7 @@ if "result_cache" not in st.session_state:
     st.session_state.result_cache = {}
 
 # ==========================================
-# 1. 検索エンジンの実行関数（高速化版）
+# 1. 検索エンジンの実行関数
 # ==========================================
 def fetch_ddg_results(query: str):
     clean_kw = query.strip().replace('`', '')
@@ -31,7 +32,7 @@ def fetch_ddg_results(query: str):
     headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
-        res = requests.post(url, data=data, headers=headers, timeout=8)
+        res = requests.post(url, data=data, headers=headers, timeout=6)
         soup = BeautifulSoup(res.text, "html.parser")
         results = []
         rows = soup.find_all("tr")
@@ -51,9 +52,20 @@ def fetch_ddg_results(query: str):
         return []
 
 def search_multi_queries(keyword: str):
-    # 検索回数を3回から1回に統合して爆速化
-    query = f'"{keyword}" 九州 支店 営業所 会社概要'
-    all_results = fetch_ddg_results(query)
+    q1 = f'"{keyword}" 会社概要 拠点 支店 一覧'
+    q2 = f'"{keyword}" 九州 福岡 支店 営業所'
+    q3 = f'"{keyword}" 公式サイト コーポレート'
+    
+    queries = [q1, q2, q3]
+    all_results = []
+    seen_urls = set()
+    
+    for q in queries:
+        res_list = fetch_ddg_results(q)
+        for r in res_list:
+            if r['url'] not in seen_urls:
+                seen_urls.add(r['url'])
+                all_results.append(r)
                 
     if not all_results:
         return "", []
@@ -74,7 +86,7 @@ def safe_parse_json(text):
         raise
 
 # ==========================================
-# 3. 複数社を一括でAI分析する関数（バッチ処理）
+# 3. 複数社を一括でAI分析する関数
 # ==========================================
 def analyze_companies_batch(batch_data, gemini_key):
     client = genai.Client(api_key=gemini_key)
@@ -160,20 +172,32 @@ if submit_button:
             else:
                 to_fetch.append(comp)
 
-        status_text.text("🌐 Web検索を実行中...")
+        status_text.text("🌐 Web検索を実行中（高速並行処理）...")
         fetched_data = []
-        for i, comp in enumerate(to_fetch):
+
+        def process_single_company(comp):
             context, raw_results = search_multi_queries(comp)
-            fetched_data.append({
+            return {
                 "company": comp,
                 "context": context,
                 "raw_results": raw_results
-            })
-            progress_bar.progress((i + 1) / max(len(to_fetch), 1) * 0.5)
+            }
+
+        # 並行処理（マルチスレッド）で検索を高速化
+        completed_count = 0
+        if to_fetch:
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                future_to_comp = {executor.submit(process_single_company, comp): comp for comp in to_fetch}
+                for future in as_completed(future_to_comp):
+                    try:
+                        data = future.result()
+                        fetched_data.append(data)
+                    except:
+                        pass
+                    completed_count += 1
+                    progress_bar.progress((completed_count / max(len(to_fetch), 1)) * 0.5)
 
         chunk_size = 10
-        analyzed_results = []
-        
         if fetched_data:
             status_text.text("🤖 AIによる一括分析を実行中...")
             for i in range(0, len(fetched_data), chunk_size):
