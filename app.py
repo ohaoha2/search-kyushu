@@ -114,7 +114,7 @@ def analyze_company_with_ai(query, web_context, gemini_key):
     """
     
     response = client.models.generate_content(
-        model='gemini-3.5-flash',
+        model='gemini-3.5-flash-lite',
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json"
