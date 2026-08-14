@@ -9,7 +9,8 @@ from google.genai import types
 
 st.set_page_config(page_title="九州拠点一括検索ツール", page_icon="✨", layout="wide")
 
-st.title("企業情報一括検索")
+st.title("✨ 九州拠点一括検索・フックキーワード提案ツール")
+st.markdown("Tavily AIとGeminiを活用した、安定・高速な一括調査ツールです。")
 
 # ==========================================
 # APIキーの自動取得（Secrets優先）
@@ -101,13 +102,14 @@ def analyze_companies_batch(batch_data, gemini_key):
 各企業ごとの共通指示:
 1. "company": 入力された会社名をそのまま格納してください。
 2. "official_url": 公式サイトのコーポレートサイトURL（Wikipedia、求人サイト、ニュースサイトは除外。見つからない場合は null）
-3. "details": 九州内の確実な直営拠点ごとの詳細情報（名称, 住所, URL）のリスト（見つからない場合は空配列 []）
-4. "is_found": 九州地方（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に、現在稼働している直営の支店、営業所、工場、事業所が明確に裏付けられる場合のみ true としてください。以下の場合は必ず false にしてください：
-   - 単なる「施工実績」「納入実績」「代理店」「パートナー企業」「別法人のグループ会社」の言及である場合
-   - すでに閉鎖・廃止された拠点である場合
-   - details が空配列 [] の場合
+3. "details": 九州地方（福岡県, 佐賀県, 長崎県, 熊本県, 大分県, 宮崎県, 鹿児島県）に実在する確実な直営拠点ごとの詳細情報（名称, 住所, URL）のリスト。※本州や北海道など、九州外の拠点は絶対に含めないこと。見つからない場合は空配列 []
+4. "is_found": 上記の九州内の直営拠点が明確に裏付けられる場合のみ true としてください。九州外の拠点しかない場合は必ず false にしてください。
 5. "sales_keywords": DX営業代行で相手に刺さるフックキーワード10個のリスト
-6. "notes": 提供された検索結果テキスト（PDFの内容や外部ドキュメントを含む）の中に、企業の「社名変更」「商号変更」に関する記述がある場合は、必ずその変更時期や新しい名称などの詳細をここに記載してください。特になければ空文字 ""
+6. "notes": 提供された検索結果の中に、直近（ここ3年以内）の以下のいずれかの重要トピックがある場合のみ、具体的に1〜2文で簡潔に記載してください。
+   - 社名変更・商号変更
+   - 拠点新設、移転、拡張
+   - M&A、グループ再編、組織変更
+   - 新規事業立ち上げや大規模な設備投資
 
 必ず以下のJSON配列フォーマットのみで回答してください：
 [
@@ -117,7 +119,7 @@ def analyze_companies_batch(batch_data, gemini_key):
         "official_url": "https://...",
         "details": [{"name": "...", "address": "...", "url": "..."}],
         "sales_keywords": ["キーワード1", "キーワード2", ...],
-        "notes": "社名変更や特記事項があれば必ずここに記載"
+        "notes": "直近の社名変更情報のみ（古い歴史は除外）"
     }
 ]
     """
@@ -125,7 +127,7 @@ def analyze_companies_batch(batch_data, gemini_key):
 
     try:
         response = client.models.generate_content(
-            model='gemini-3.5-flash-lite',
+            model='gemini-2.5-flash',
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
@@ -151,6 +153,8 @@ if submit_button:
     elif not tavily_api_key or not gemini_key:
         st.error("⚠️ Streamlitの Secrets に TAVILY_API_KEY または GEMINI_API_KEY が設定されていません。")
     else:
+        st.session_state.result_cache = {}
+
         lines = raw_input.strip().split("\n")
         company_list = []
         for line in lines:
@@ -163,16 +167,10 @@ if submit_button:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        to_fetch = []
+        to_fetch = company_list
         company_map = {}
 
-        for comp in company_list:
-            if comp in st.session_state.result_cache:
-                company_map[comp] = st.session_state.result_cache[comp]
-            else:
-                to_fetch.append(comp)
-
-        status_text.text("検索中...")
+        status_text.text("🌐 Tavily AIで高速検索を実行中...")
         fetched_data = []
         for i, comp in enumerate(to_fetch):
             context, raw_results = search_multi_queries(comp, tavily_api_key)
@@ -186,7 +184,7 @@ if submit_button:
         chunk_size = 10
         
         if fetched_data:
-            status_text.text("一括分析を実行中...")
+            status_text.text("🤖 AIによる一括分析を実行中...")
             for i in range(0, len(fetched_data), chunk_size):
                 chunk = fetched_data[i:i+chunk_size]
                 res_list = analyze_companies_batch(chunk, gemini_key)
@@ -210,6 +208,9 @@ if submit_button:
                 
                 progress_bar.progress(0.5 + ((i + len(chunk)) / len(fetched_data)) * 0.5)
 
+        # 九州の県名リスト（強制バリデーション用）
+        kyushu_prefectures = ["福岡", "佐賀", "長崎", "熊本", "大分", "宮崎", "鹿児島"]
+
         for comp in company_list:
             res = company_map.get(comp, {
                 "is_found": False,
@@ -219,12 +220,25 @@ if submit_button:
                 "notes": ""
             })
 
+            # 【強力な安全装置】抽出された拠点の住所に「九州の県名」が含まれているかをPython側で強制チェック
+            raw_details = res.get('details', [])
+            valid_details = []
+            for d in raw_details:
+                addr = d.get('address', '')
+                if any(pref in addr for pref in kyushu_prefectures):
+                    valid_details.append(d)
+
+            # 有効な九州拠点が1つもなければ、強制的に is_found = False に書き換える
+            if not valid_details:
+                res['is_found'] = False
+                valid_details = []
+
             is_found_str = "⭕ 九州拠点あり" if res.get('is_found') else "❌ 九州拠点なし"
             official_url = res.get('official_url')
             if not official_url or official_url in ["null", ""]: 
                 official_url = None
             
-            details_summary = ", ".join([f"{d.get('name')} ({d.get('address')})" for d in res.get('details', [])])
+            details_summary = ", ".join([f"{d.get('name')} ({d.get('address')})" for d in valid_details])
             keywords_summary = ", ".join(res.get('sales_keywords', []))
             notes_text = res.get('notes', '')
 
@@ -235,7 +249,7 @@ if submit_button:
                 "九州拠点": details_summary if details_summary else "なし",
                 "フックキーワード": keywords_summary,
                 "特記事項": notes_text,
-                "_raw_details": res.get('details', []),
+                "_raw_details": valid_details,
                 "_raw_keywords": res.get('sales_keywords', []),
                 "_raw_notes": notes_text
             })
@@ -253,7 +267,12 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
     st.divider()
     st.subheader("📊 検索・分析結果一覧")
 
-    df_display = pd.DataFrame(results)[["会社名", "判定", "公式サイト", "九州拠点", "フックキーワード", "特記事項"]]
+    df_display = pd.DataFrame(results)
+    expected_columns = ["会社名", "判定", "公式サイト", "九州拠点", "フックキーワード", "特記事項"]
+    for col in expected_columns:
+        if col not in df_display.columns:
+            df_display[col] = ""
+    df_display = df_display[expected_columns]
     
     st.dataframe(
         df_display,
@@ -285,17 +304,17 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
     
     for r in results:
         with st.expander(f"{r['会社名']} ── 【 {r['判定']} 】"):
-            if r['公式サイト']:
+            if r.get('公式サイト'):
                 st.markdown(f"**🌐 公式サイト:** [{r['公式サイト']}]({r['公式サイト']})")
             
             if r.get('_raw_notes'):
                 st.info(f"💡 **特記事項:** {r['_raw_notes']}")
             
-            if r['_raw_keywords']:
+            if r.get('_raw_keywords'):
                 st.markdown("**🔑 フックキーワード:**")
                 st.markdown(" ".join([f"`{kw}`" for kw in r['_raw_keywords']]))
                 
-            if r['_raw_details']:
+            if r.get('_raw_details'):
                 st.markdown("**📍 拠点詳細:**")
                 for d in r['_raw_details']:
                     with st.container(border=True):
