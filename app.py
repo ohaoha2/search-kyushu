@@ -17,7 +17,7 @@ st.markdown("スプレッドシートなどから会社名をコピーし、下�
 # 0. セッションステート初期化
 # ==========================================
 if "search_history" not in st.session_state:
-    st.session_state.search_history = []
+    st.session_state.search_history = []
 if "result_cache" not in st.session_state:
     st.session_state.result_cache = {}
 
