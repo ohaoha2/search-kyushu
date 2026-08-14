@@ -12,6 +12,12 @@ st.set_page_config(page_title="九州拠点リサーチ", page_icon="✨")
 st.title("九州拠点リサーチツール")
 
 # ==========================================
+# 0. セッションステート（履歴）の初期化
+# ==========================================
+if "search_history" not in st.session_state:
+    st.session_state.search_history = []
+
+# ==========================================
 # 1. DuckDuckGo Lite による検索関数
 # ==========================================
 def search_ddg_lite(keyword: str):
@@ -72,7 +78,6 @@ def safe_parse_json(text):
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # マークダウンのバッククォートなどが混ざった場合のエスケープ処理
         text = re.sub(r"```json", "", text)
         text = re.sub(r"```", "", text).strip()
         match = re.search(r"\{.*\}", text, re.DOTALL)
@@ -119,16 +124,35 @@ def analyze_company_with_ai(query, web_context, gemini_key):
     return safe_parse_json(response.text.strip())
 
 # ==========================================
-# 3. Streamlit UI 構築（Enterキー対応フォーム）
+# 3. Streamlit UI 構築（履歴機能 ＆ フォーム）
 # ==========================================
+
+# 履歴がある場合は、セレクトボックスで選べるようにする
+default_query = ""
+if st.session_state.search_history:
+    selected_history = st.selectbox(
+        "🕒 過去の検索履歴から選ぶ",
+        ["-- 履歴から選択する --"] + st.session_state.search_history
+    )
+    if selected_history != "-- 履歴から選択する --":
+        default_query = selected_history
+
 with st.form(key="search_form"):
-    query = st.text_input("会社名、住所等を入力", placeholder="例: 〇〇株式会社")
+    # 履歴から選ばれていればそれがテキストボックスの初期値になる
+    query = st.text_input("会社名、住所等を入力", value=default_query, placeholder="例: 〇〇株式会社")
     submit_button = st.form_submit_button("検索", type="primary")
 
 if submit_button:
     if not query:
         st.warning("会社名、住所等を入力してください。")
     else:
+        # 履歴への追加処理（重複を避け、最新を先頭にする。最大10件まで）
+        if query in st.session_state.search_history:
+            st.session_state.search_history.remove(query)
+        st.session_state.search_history.insert(0, query)
+        if len(st.session_state.search_history) > 10:
+            st.session_state.search_history.pop()
+
         gemini_key = os.getenv("GEMINI_API_KEY")
         
         if not gemini_key:
@@ -155,7 +179,7 @@ if submit_button:
                             
                             keywords = result.get('sales_keywords', [])
                             if keywords:
-                                st.markdown("### 🔑 フックキーワード")
+                                st.markdown("### 🔑 DX営業アプローチキーワード")
                                 keywords_md = " ".join([f"`{kw}`" for kw in keywords])
                                 st.markdown(keywords_md)
                             
