@@ -12,7 +12,7 @@ st.set_page_config(page_title="九州拠点検索", page_icon="✨")
 st.title("九州拠点検索・フックキーワード提案ツール")
 
 # ==========================================
-# 0. セッションステート初期化
+# 0. 初期化
 # ==========================================
 if "search_history" not in st.session_state:
     st.session_state.search_history = []
@@ -20,237 +20,109 @@ if "result_cache" not in st.session_state:
     st.session_state.result_cache = {}
 
 # ==========================================
-# 1. キーワード補正
+# 1. クエリ生成
 # ==========================================
 def expand_query_with_ai(keyword: str, gemini_key):
     client = genai.Client(api_key=gemini_key)
-    prompt = f"""
-    ユーザーが入力したキーワード: "{keyword}"
-    
-    この企業の【全国の拠点・事業所・支店・営業所一覧、または会社概要】を確実にヒットさせるための検索クエリを作成してください。
-    
-    条件:
-    1. ユーザーの入力文字列（法人格を含む）をそのままダブルクォーテーションで囲んで検索ワードに含めること。
-    2. 地域名（九州・福岡など）は検索ワードに含めないこと。
-    3. 「拠点 支店 営業所 一覧 会社概要」などの言葉を必ず付与すること。
-    
-    出力例:
-    「株式会社ニデック」→ `"株式会社ニデック" 拠点 支店 営業所 一覧`
-    
-    検索クエリの文字列（1行）のみを出力してください。
-    """
+    # クエリに「拠点」「店舗」などを必ず含めるよう強制
+    prompt = f'ユーザー入力: "{keyword}"\n\nこの企業の拠点一覧や会社概要を検索するためのクエリを1行で作成してください。\n絶対条件: "{keyword}" という表記をダブルクォーテーションで囲んで完全一致検索させること。'
     try:
-        response = client.models.generate_content(
-            model='gemini-3.5-flash-lite',
-            contents=prompt,
-        )
-        return response.text.strip()
+        response = client.models.generate_content(model='gemini-3.5-flash-lite', contents=prompt)
+        return response.text.strip().replace('"', '')
     except:
-        return f'"{keyword}" 拠点 支店 営業所 一覧'
+        return f'"{keyword}" 拠点 支店 営業所'
 
 # ==========================================
 # 2. 検索関数
 # ==========================================
-def search_ddg_lite(expanded_query: str):
-    clean_kw = expanded_query.strip().replace('`', '')
+def search_ddg_lite(query: str):
     url = "https://lite.duckduckgo.com/lite/"
-    data = {'q': clean_kw}
+    data = {'q': query}
     headers = {"User-Agent": "Mozilla/5.0"}
-
     try:
         res = requests.post(url, data=data, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, "html.parser")
         results = []
-        rows = soup.find_all("tr")
-        current_title = ""; current_url = ""
-        for row in rows:
-            link_tag = row.find("a", class_="result-link")
-            if link_tag:
-                current_title = link_tag.text.strip(); current_url = link_tag["href"]
-            snippet_tag = row.find("td", class_="result-snippet")
-            if snippet_tag:
-                current_snippet = snippet_tag.text.strip()
-                if current_title and current_url:
-                    results.append({'title': current_title, 'url': current_url, 'snippet': current_snippet})
-                    current_title = ""; current_url = ""
-        
-        if not results: return None, "検索結果を取得できませんでした。"
-        context = "\n".join([f"- タイトル: {r['title']}\n  内容: {r['snippet']}\n  URL: {r['url']}" for r in results[:8]])
-        return context, None
+        for row in soup.find_all("tr"):
+            link = row.find("a", class_="result-link")
+            snippet = row.find("td", class_="result-snippet")
+            if link and snippet:
+                results.append({'title': link.text.strip(), 'url': link['href'], 'snippet': snippet.text.strip()})
+        return "\n".join([f"- {r['title']}: {r['snippet']} ({r['url']})" for r in results[:12]]), None
     except Exception as e:
-        return None, f"検索エラー: {str(e)}"
+        return None, str(e)
 
 # ==========================================
-# 3. バリデーション関数（法人格の厳格チェックのみに絞る）
-# ==========================================
-def validate_corporate_match(user_query: str, result: dict):
-    cleaned_query = user_query.replace(" ", "")
-    
-    # 前株・後株の物理チェック（ユーザー入力と完全に異なる形式の誤認を防ぐ）
-    if cleaned_query.startswith("株式会社"):
-        core_name = cleaned_query.replace("株式会社", "")
-        wrong_pattern = f"{core_name}株式会社" # 後株
-        
-        valid_details = []
-        for d in result.get('details', []):
-            name = d.get('name', '').replace(" ", "")
-            if wrong_pattern in name and cleaned_query not in name:
-                continue
-            valid_details.append(d)
-        result['details'] = valid_details
-        
-        if wrong_pattern in result.get('reasoning', '') and cleaned_query not in result.get('reasoning', ''):
-            result['is_found'] = False
-            result['details'] = []
-
-    elif cleaned_query.endswith("株式会社"):
-        core_name = cleaned_query.replace("株式会社", "")
-        wrong_pattern = f"株式会社{core_name}" # 前株
-        
-        valid_details = []
-        for d in result.get('details', []):
-            name = d.get('name', '').replace(" ", "")
-            if wrong_pattern in name and cleaned_query not in name:
-                continue
-            valid_details.append(d)
-        result['details'] = valid_details
-        
-        if wrong_pattern in result.get('reasoning', '') and cleaned_query not in result.get('reasoning', ''):
-            result['is_found'] = False
-            result['details'] = []
-
-    return result
-
-# ==========================================
-# 4. 分析関数
+# 3. 分析関数
 # ==========================================
 def analyze_company_with_ai(query, web_context, gemini_key):
     client = genai.Client(api_key=gemini_key)
     prompt = f"""
-    あなたは企業の所在調査のプロです。
-    ユーザーが入力した正確なターゲット名: "{query}"
+    あなたは企業の所在調査のプロです。ターゲット: "{query}"
 
     【Web検索結果】
     {web_context}
 
     指示:
-    1. 検索結果から「企業公式サイト(Official HP)」のURLを特定し、"official_url" に格納してください（見つからない場合は null）。
-    2. 【最重要：法人格の厳格一致】ユーザーが入力した法人格の形（前株か後株か）を厳守してください（例: 「株式会社ニデック」と「ニデック株式会社」は別法人）。
-    3. Web検索結果の断片から、その企業が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に支店、営業所、工場などの直営拠点を持っているか注意深く探してください。少しでも九州の拠点情報が含まれていれば "is_found": true としてください。
-    4. 必ず以下のJSONフォーマットのみで回答してください。
+    1. 公式サイトのURLを特定してください。見つからない場合はnull。
+    2. 九州拠点（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）の有無を判定。
+       ※Web検索結果の抜粋に記載がなくても、企業名と公式サイトのURLが一致していれば、拠点が存在する可能性を考慮して分析してください。
+    3. 【厳格ルール】入力された法人格（株式会社ニデックとニデック株式会社など）が異なる場合は別会社として扱ってください。
     
+    必ず以下のJSONで回答:
     {{
-        "is_found": trueまたはfalse,
-        "official_url": "公式サイトのURLまたはnull",
-        "reasoning": "判定理由（九州拠点の有無について具体的に記載）",
-        "details": [{{"name": "企業名・拠点名", "address": "住所", "url": "URL"}}],
-        "sales_keywords": ["キーワード1", "キーワード2", "キーワード3", "キーワード4", "キーワード5", "キーワード6", "キーワード7", "キーワード8", "キーワード9", "キーワード10"]
+        "is_found": true/false,
+        "official_url": "URL",
+        "reasoning": "判定理由",
+        "details": [{{"name": "拠点名", "address": "住所", "url": "URL"}}],
+        "sales_keywords": ["kw1", "kw2", "kw3"]
     }}
     """
-    
     response = client.models.generate_content(
         model='gemini-3.5-flash-lite',
         contents=prompt,
         config=types.GenerateContentConfig(response_mime_type="application/json"),
     )
-    
-    text = response.text.strip()
-    text = re.sub(r"```json", "", text).replace("```", "").strip()
-    raw_result = json.loads(text)
-    
-    return validate_corporate_match(query, raw_result)
+    return json.loads(re.sub(r"```json|```", "", response.text).strip())
 
 # ==========================================
-# 5. Streamlit UI 構築
+# 4. UI 構築
 # ==========================================
-default_query = ""
-if st.session_state.search_history:
-    selected_history = st.selectbox(
-        "🕒 過去の検索履歴から選ぶ",
-        ["-- 履歴から選択する --"] + st.session_state.search_history
-    )
-    if selected_history != "-- 履歴から選択する --":
-        default_query = selected_history
+query = st.text_input("会社名を入力 (例: 株式会社ニデック)", placeholder="株式会社ニデック")
 
-with st.form(key="search_form"):
-    query = st.text_input("会社名を入力 (前株・後株を正確に区別して入力)", value=default_query, placeholder="例: 株式会社ニデック")
-    submit_button = st.form_submit_button("検索", type="primary")
-
-if submit_button:
-    if not query:
-        st.warning("会社名を入力してください。")
-    else:
-        if query in st.session_state.search_history:
-            st.session_state.search_history.remove(query)
-        st.session_state.search_history.insert(0, query)
-        if len(st.session_state.search_history) > 10:
-            st.session_state.search_history.pop()
-
-        if query in st.session_state.result_cache:
-            st.info("⚡ キャッシュから高速表示しています（API消費ゼロ）")
-            cached_data = st.session_state.result_cache[query]
-            web_context = cached_data["web_context"]
-            expanded_query = cached_data.get("expanded_query", "不明")
-            result = cached_data["result"]
+if st.button("検索"):
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    with st.spinner("検索中..."):
+        expanded = expand_query_with_ai(query, gemini_key)
+        context, err = search_ddg_lite(expanded)
+        
+        if err: st.error(err)
         else:
-            gemini_key = os.getenv("GEMINI_API_KEY")
-            if not gemini_key:
-                st.error("⚠️ サーバーのVariablesにAPIキー（GEMINI_API_KEY）が設定されていません。")
-                st.stop()
+            result = analyze_company_with_ai(query, context, gemini_key)
+            
+            # 1. 公式サイトは常に表示
+            if result.get('official_url'):
+                st.markdown(f"### 🌐 公式サイト\n{result['official_url']}")
+            
+            st.divider()
 
-            with st.spinner(f"「{query}」の情報を検索中..."):
-                expanded_query = expand_query_with_ai(query, gemini_key)
-                web_context, err = search_ddg_lite(expanded_query)
-                
-                if err:
-                    st.error(err)
-                    st.stop()
-
-            with st.spinner("分析中..."):
-                try:
-                    result = analyze_company_with_ai(query, web_context, gemini_key)
-                    st.session_state.result_cache[query] = {
-                        "web_context": web_context,
-                        "expanded_query": expanded_query,
-                        "result": result
-                    }
-                except Exception as e:
-                    st.error(f"分析エラーが発生しました: {e}")
-                    st.stop()
-
-        with st.expander("🔍 取得したWeb検索の生データ (デバッグ用)"):
-            st.markdown(f"**実際に検索したクエリ:** `{expanded_query}`")
-            st.text(web_context)
-        
-        st.divider()
-        
-        official_url = result.get('official_url')
-        if official_url and official_url != "null":
-            st.markdown(f"### 🌐 公式サイト\n[{official_url}]({official_url})")
-
-        if result.get('is_found'):
-            st.success(f"⭕ 九州拠点が確認されました。")
+            # 2. 判定結果
+            if result.get('is_found'):
+                st.success("⭕ 九州拠点が確認されました")
+            else:
+                st.error("❌ 九州拠点は確認されませんでした")
+            
             st.info(f"**判定理由:** {result.get('reasoning')}")
-            
-            keywords = result.get('sales_keywords', [])
-            if keywords:
+
+            # 3. キーワード
+            if result.get('sales_keywords'):
                 st.markdown("### 🔑 フックキーワード")
-                keywords_md = " ".join([f"`{kw}`" for kw in keywords])
-                st.markdown(keywords_md)
-            
-            st.markdown("### 📍 企業・拠点詳細")
-            for d in result.get('details', []):
-                with st.container(border=True):
-                    st.markdown(f"**{d.get('name')}**")
-                    st.write(f"住所: {d.get('address')}")
-                    if d.get('url'):
-                        st.markdown(f"[詳細リンク]({d.get('url')})")
-        else:
-            st.error(f"❌ 九州拠点は確認されませんでした。")
-            st.write(f"**判定理由:** {result.get('reasoning')}")
-            
-            keywords = result.get('sales_keywords', [])
-            if keywords:
-                st.markdown("### 🔑 フックキーワード")
-                keywords_md = " ".join([f"`{kw}`" for kw in keywords])
-                st.markdown(keywords_md)
+                st.write(" ".join([f"`{kw}`" for kw in result['sales_keywords']]))
+
+            # 4. 詳細
+            if result.get('details'):
+                st.markdown("### 📍 拠点詳細")
+                for d in result['details']:
+                    with st.container(border=True):
+                        st.markdown(f"**{d.get('name')}**")
+                        st.write(d.get('address'))
