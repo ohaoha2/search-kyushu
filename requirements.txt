@@ -1,4 +1,6 @@
 streamlit
-requests
+pandas
 beautifulsoup4
+requests
 google-genai
+tavily-python
