@@ -232,7 +232,6 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
                 "公式サイト",
                 help="クリックして公式サイトを開く",
                 max_chars=100,
-                display_url=None
             )
         },
         use_container_width=True
