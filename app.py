@@ -10,7 +10,6 @@ from google.genai import types
 st.set_page_config(page_title="企業情報一括検索ツール", layout="wide")
 
 st.title("企業情報一括検索ツール")
-st.markdown("Tavily AIとGeminiを活用した企業情報一括検索ツールです。")
 
 # ==========================================
 # APIキーの自動取得（Secrets優先）
