@@ -50,11 +50,11 @@ if st.button("無料で調査する", type="primary"):
                 """
                 
                 # 最新の gemini-3.5-flash と Google検索ツール（Grounding）を使用
+# Google検索ツールを外してテスト
                 response = client.models.generate_content(
                     model='gemini-3.5-flash',
                     contents=prompt,
                     config=types.GenerateContentConfig(
-                        tools=[{'google_search': {}}],
                         response_mime_type="application/json"
                     ),
                 )
