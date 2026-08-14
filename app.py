@@ -55,12 +55,11 @@ def fetch_tavily_results(query: str, api_key: str):
 
 
 def search_multi_queries(keyword: str, api_key: str):
-    # 目的を分けて検索する
+    # API使用量を抑えるため検索は2クエリのみ
     q1 = f'"{keyword}" 会社概要 公式サイト'
-    q2 = f'"{keyword}" 九州 拠点 支店 営業所'
-    q3 = f'"{keyword}" 九州 事業所 支社 事業部 営業拠点'
+    q2 = f'"{keyword}" 九州 支店 営業所'
 
-    queries = [q1, q2, q3]
+    queries = [q1, q2]
 
     all_results = []
     seen_urls = set()
@@ -78,7 +77,6 @@ def search_multi_queries(keyword: str, api_key: str):
     if not all_results:
         return "", []
 
-    # AIに渡す検索結果
     context = "\n".join(
         [
             f"- タイトル: {r['title']}\n"
@@ -127,7 +125,9 @@ def analyze_companies_batch(batch_data, gemini_key):
     template = """
 あなたは企業の所在調査のプロフェッショナルです。ハルシネーションを厳禁とします。
 提供された検索結果から確認できない情報を推測・補完してはいけません。
-以下の複数の企業について、それぞれ提供された検索結果を基に厳密に調査し、結果を必ずJSONの配列（リスト）で返してください。
+
+以下の複数の企業について、それぞれ提供された検索結果を基に厳密に調査し、
+結果を必ずJSONの配列（リスト）で返してください。
 
 {prompt_targets}
 
@@ -137,24 +137,38 @@ def analyze_companies_batch(batch_data, gemini_key):
 入力された会社名をそのまま格納してください。
 
 2. "official_url"
-公式サイトのコーポレートサイトURL。
+対象企業自身の公式サイトのコーポレートサイトURLを記載してください。
 Wikipedia、求人サイト、ニュースサイト等は除外してください。
-公式サイトであることを検索結果から確認できない場合は null としてください。
+検索結果から対象企業自身の公式サイトであることを確認できない場合は null としてください。
 
 3. "is_found"
-九州地方（福岡、佐賀、長崎、熊本、大分、宮崎、鹿児島）に、現在稼働している対象企業自身の直営拠点が明確に確認できる場合のみ true としてください。
+
+以下の3つのいずれかを設定してください。
+
+"⭕️九州拠点あり"
+対象企業自身が現在運営している九州内の直営拠点が、検索結果から明確に確認できる場合。
+
+"❌九州拠点なし"
+対象企業自身に現在の九州拠点がないことが検索結果から明確に確認できる場合。
+
+"❓判定不明"
+検索結果だけでは、対象企業自身の現在の九州拠点であるか確認できない場合。
+少しでも判断に迷う場合はこちらを使用してください。
+
+「九州に住所がある」だけでは、九州拠点ありとは判定しないでください。
+対象企業自身がその拠点を運営していることが確認できる必要があります。
 
 対象となる拠点：
 - 支店
-- 営業所
 - 支社
+- 営業所
 - 工場
 - 事業所
 - 研究所
 - 対象企業自身が運営する事業部
 - その他、対象企業自身の営業拠点
 
-以下は対象外です：
+以下は原則として対象外です：
 - 施工実績
 - 納入実績
 - 顧客先
@@ -167,62 +181,76 @@ Wikipedia、求人サイト、ニュースサイト等は除外してくださ�
 - 関連会社
 - 別法人のグループ会社
 - フランチャイズ店舗
-- 店舗・ショップ・販売拠点
+- 単なる店舗・ショップ
 - 配送センター
 - 物流センター
 - 倉庫
 - 単なる配送先・納品先
 
-ただし、店舗・配送センター等とは別に、対象企業自身の法人事業部・営業拠点が明確に確認できる場合は、その拠点を対象としてください。
+ただし、対象企業自身の法人事業部や営業拠点であることが明確に確認できる場合は対象としてください。
 
-以下の場合は false としてください：
-- 九州に対象企業自身の現在稼働する拠点がないことが明確な場合
-- 九州拠点として挙げられているのが、子会社・関連会社・別法人のグループ会社等の拠点である場合
-- 過去の拠点情報であり、現在も稼働していることが確認できない場合
-- 閉鎖・統合・再編前の拠点しか確認できない場合
+特に、持株会社については、子会社・グループ会社の拠点を持株会社自身の拠点として扱わないでください。
 
-以下の場合は null としてください：
-- 九州拠点らしき情報はあるが、対象企業自身の拠点であることを確認できない場合
-- 現在も稼働しているか確認できない場合
-- 検索結果同士で情報が矛盾している場合
-- 古い情報と新しい情報が混在し、現在の状態を確定できない場合
-- 拠点名は確認できるが、直営拠点であることの裏付けが不十分な場合
+また、拠点名・住所・建物名に対象企業名が含まれているだけでは、
+対象企業自身の拠点とは判定しないでください。
 
-「ありそう」「全国展開しているから九州にもありそう」といった推測は禁止してください。
+以下の場合は「❓判定不明」としてください：
+- 九州拠点らしき情報はあるが、対象企業自身の拠点であることを確認できない
+- 現在も稼働しているか確認できない
+- 古い情報と新しい情報が混在している
+- 検索結果同士で情報が矛盾している
+- 拠点名は確認できるが、直営拠点であることの裏付けが不十分
+- 過去の営業所・支店情報があるが、現在の状態を確認できない
 
-確実に確認できない場合は true にせず、false または null としてください。
+以下の場合は「❌九州拠点なし」としてください：
+- 対象企業自身の現在の九州拠点がないことが明確
+- 九州にあるのが別法人の子会社・関連会社・グループ会社等の拠点だけであることが明確
+
+過去の拠点情報や閉鎖・統合・再編前の情報を、現在の拠点として扱わないでください。
+
+「全国展開している」「九州でも営業している」などの情報だけで
+九州拠点ありとは判定しないでください。
 
 4. "details"
-九州内の確実な直営拠点ごとの詳細情報をリストにしてください。
 
-各拠点：
-- "name": 拠点名称
-- "address": 住所
-- "url": その拠点の存在および対象企業自身の拠点であることを裏付けるURL
+対象企業自身が現在運営していることが明確に確認できる九州内の拠点だけを記載してください。
 
-対象企業自身の拠点であることを確認できない拠点は含めないでください。
+各拠点は以下の形式：
 
-子会社・関連会社・グループ会社など別法人の拠点は含めないでください。
+{
+    "name": "拠点名",
+    "address": "住所",
+    "url": "その拠点が対象企業自身の拠点であることを裏付けるURL"
+}
 
-店舗、配送センター、物流センター、倉庫なども原則として含めないでください。
+対象企業自身の拠点であることを確認できない場合は記載しないでください。
+
+子会社、関連会社、グループ会社など別法人の拠点は含めないでください。
+
+店舗、配送センター、物流センター、倉庫なども、対象企業自身の事業拠点であることが明確でない限り含めないでください。
 
 現在稼働していることを確認できない過去の拠点も含めないでください。
 
 確実な拠点がない場合は [] としてください。
 
+is_found が「❓判定不明」の場合でも、確実に確認できない拠点は details に含めないでください。
+
 5. "sales_keywords"
+
 DX営業代行で相手に刺さるフックキーワードを10個のリストで返してください。
+企業の事業内容や検索結果から確認できる特徴を踏まえてください。
 
 6. "notes"
-提供された検索結果の中に、2023年8月14日以降の以下のいずれかの重要トピックが明確に確認できる場合のみ、日付と短い名詞句で簡潔に記載してください。
+
+提供された検索結果の中に、ここ3年以内（2023年8月14日以降）の以下のいずれかの重要トピックが明確に確認できる場合のみ、
+日付と短い名詞句で簡潔に記載してください。
+それ以外は必ず [] としてください。
 
 - 社名変更・商号変更
 - 拠点新設、移転、拡張
 - M&A、グループ再編、組織変更
 - 新規事業立ち上げ
 - 大規模な設備投資
-
-該当しない場合は必ず [] としてください。
 
 関係のないニュースや上場情報などは notes に入れないでください。
 
@@ -232,26 +260,36 @@ DX営業代行で相手に刺さるフックキーワードを10個のリスト�
     {
         "company": "会社名",
         "official_url": "https://...",
-        "is_found": true,
+        "is_found": "⭕️九州拠点あり",
         "details": [
             {
-                "name": "...",
-                "address": "...",
-                "url": "..."
+                "name": "拠点名",
+                "address": "住所",
+                "url": "https://..."
             }
         ],
         "sales_keywords": [
             "キーワード1",
-            "キーワード2"
+            "キーワード2",
+            "キーワード3",
+            "キーワード4",
+            "キーワード5",
+            "キーワード6",
+            "キーワード7",
+            "キーワード8",
+            "キーワード9",
+            "キーワード10"
         ],
         "notes": []
     }
 ]
 
-九州拠点の有無を確実に判定できない場合は、
-"is_found": null
-としてください。
+is_found は必ず次のいずれかにしてください：
+「⭕️九州拠点あり」
+「❌九州拠点なし」
+「❓判定不明」
 """
+
 
     prompt = template.replace("{prompt_targets}", prompt_targets)
 
@@ -275,6 +313,7 @@ DX営業代行で相手に刺さるフックキーワードを10個のリスト�
 # 4. Streamlit UI 構築
 # ==========================================
 with st.form(key="batch_search_form"):
+
     raw_input = st.text_area(
         "会社名リストを入力（スプレッドシートからそのまま貼り付け可能）",
         placeholder="株式会社〇〇\n株式会社△△",
@@ -300,9 +339,6 @@ if submit_button:
     else:
         st.session_state.result_cache = {}
 
-        # ------------------------------------------
-        # 会社名リストの取得
-        # ------------------------------------------
         lines = raw_input.strip().split("\n")
 
         company_list = []
@@ -375,29 +411,50 @@ if submit_button:
 
                         comp_name = r.get("company")
 
+                        # ----------------------------------
+                        # official_url
+                        # ----------------------------------
                         if (
                             not r.get("official_url")
                             or r.get("official_url") in ["null", ""]
                         ):
                             r["official_url"] = None
 
-                        # is_foundをtrue / false / nullに正規化
-                        if "is_found" not in r:
-                            r["is_found"] = None
+                        # ----------------------------------
+                        # is_found
+                        # ----------------------------------
+                        if r.get("is_found") not in [
+                            "⭕️九州拠点あり",
+                            "❌九州拠点なし",
+                            "❓判定不明"
+                        ]:
+                            r["is_found"] = "❓判定不明"
 
-                        elif r["is_found"] not in [True, False, None]:
-                            r["is_found"] = None
-
-                        # detailsをリストに正規化
-                        if not isinstance(r.get("details"), list):
+                        # ----------------------------------
+                        # details
+                        # ----------------------------------
+                        if not isinstance(
+                            r.get("details"),
+                            list
+                        ):
                             r["details"] = []
 
-                        # keywordsをリストに正規化
-                        if not isinstance(r.get("sales_keywords"), list):
+                        # ----------------------------------
+                        # sales_keywords
+                        # ----------------------------------
+                        if not isinstance(
+                            r.get("sales_keywords"),
+                            list
+                        ):
                             r["sales_keywords"] = []
 
-                        # notesをリストに正規化
-                        if not isinstance(r.get("notes"), list):
+                        # ----------------------------------
+                        # notes
+                        # ----------------------------------
+                        if not isinstance(
+                            r.get("notes"),
+                            list
+                        ):
                             r["notes"] = []
 
                         company_map[comp_name] = r
@@ -432,7 +489,7 @@ if submit_button:
             res = company_map.get(
                 comp,
                 {
-                    "is_found": None,
+                    "is_found": "❓判定不明",
                     "official_url": None,
                     "details": [],
                     "sales_keywords": [],
@@ -467,30 +524,27 @@ if submit_button:
 
             # ------------------------------------------
             # 判定整合性
-            #
-            # trueなのに確実なdetailがない場合だけ、
-            # trueを維持せず「不明」にする。
-            #
-            # false / null は勝手にtrueにしない。
+            # trueなのに詳細拠点がない場合は
+            # 「判定不明」に落とす
             # ------------------------------------------
-            if res.get("is_found") is True and not valid_details:
-                res["is_found"] = None
+            if (
+                res.get("is_found")
+                == "⭕️九州拠点あり"
+                and not valid_details
+            ):
+                res["is_found"] = "❓判定不明"
 
-            is_found = res.get("is_found")
-
-            if is_found is True:
-                is_found_str = "⭕️九州拠点あり"
-
-            elif is_found is False:
-                is_found_str = "❌九州拠点なし"
-
-            else:
-                is_found_str = "△判定不明"
+            is_found_str = res.get(
+                "is_found",
+                "❓判定不明"
+            )
 
             # ------------------------------------------
             # official_url
             # ------------------------------------------
-            official_url = res.get("official_url")
+            official_url = res.get(
+                "official_url"
+            )
 
             if (
                 not official_url
@@ -514,7 +568,10 @@ if submit_button:
                 []
             )
 
-            if not isinstance(keywords, list):
+            if not isinstance(
+                keywords,
+                list
+            ):
                 keywords = []
 
             keywords_summary = ", ".join(
@@ -530,13 +587,20 @@ if submit_button:
                 []
             )
 
-            if isinstance(notes, list):
+            if isinstance(
+                notes,
+                list
+            ):
                 notes_text = ", ".join(
                     str(x)
                     for x in notes
                 )
             else:
-                notes_text = str(notes) if notes else ""
+                notes_text = (
+                    str(notes)
+                    if notes
+                    else ""
+                )
 
             # ------------------------------------------
             # 結果格納
@@ -554,16 +618,19 @@ if submit_button:
                 "特記事項": notes_text,
 
                 # 内部データ
-                "_is_found": is_found,
                 "_raw_details": valid_details,
                 "_raw_keywords": keywords,
                 "_raw_notes": notes_text
             })
 
         progress_bar.progress(1.0)
-        status_text.text("すべての処理が完了しました。")
+        status_text.text(
+            "すべての処理が完了しました。"
+        )
 
-        st.session_state["batch_results"] = batch_results
+        st.session_state[
+            "batch_results"
+        ] = batch_results
 
 
 # ==========================================
@@ -574,12 +641,18 @@ if (
     and st.session_state["batch_results"]
 ):
 
-    results = st.session_state["batch_results"]
+    results = st.session_state[
+        "batch_results"
+    ]
 
     st.divider()
-    st.subheader("検索・分析結果一覧")
+    st.subheader(
+        "検索・分析結果一覧"
+    )
 
-    df_display = pd.DataFrame(results)
+    df_display = pd.DataFrame(
+        results
+    )
 
     expected_columns = [
         "会社名",
@@ -591,6 +664,7 @@ if (
     ]
 
     for col in expected_columns:
+
         if col not in df_display.columns:
             df_display[col] = ""
 
@@ -650,7 +724,9 @@ if (
     # 各社詳細・カード表示
     # ------------------------------------------
     st.divider()
-    st.subheader("各社詳細・カード表示")
+    st.subheader(
+        "各社詳細・カード表示"
+    )
 
     for r in results:
 
