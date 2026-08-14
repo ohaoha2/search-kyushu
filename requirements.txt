@@ -1,3 +1,2 @@
 streamlit
-exa-py
-openai
+google-genai
