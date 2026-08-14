@@ -27,16 +27,15 @@ def expand_query_with_ai(keyword: str, gemini_key):
     prompt = f"""
     ユーザーが入力したキーワード: "{keyword}"
     
-    この企業の【全国の拠点・事業所・店舗一覧、または会社概要】を検索するためのクエリを作成してください。
+    この企業の【全国の拠点・事業所・支店・営業所一覧、または会社概要】を確実にヒットさせるための検索クエリを作成してください。
     
     条件:
     1. ユーザーの入力文字列（法人格を含む）をそのままダブルクォーテーションで囲んで検索ワードに含めること。
-    2. 地域名（九州・福岡など）は含めないこと。
-    3. 「会社概要 拠点 支店」などの一般的な言葉を付与すること。
+    2. 地域名（九州・福岡など）は検索ワードに含めないこと。
+    3. 「拠点 支店 営業所 一覧 会社概要」などの言葉を必ず付与すること。
     
     出力例:
-    「株式会社ニデック」→ `"株式会社ニデック" 会社概要 拠点 支店`
-    「ニデック株式会社」→ `"ニデック株式会社" 会社概要 拠点 支店`
+    「株式会社ニデック」→ `"株式会社ニデック" 拠点 支店 営業所 一覧`
     
     検索クエリの文字列（1行）のみを出力してください。
     """
@@ -47,7 +46,7 @@ def expand_query_with_ai(keyword: str, gemini_key):
         )
         return response.text.strip()
     except:
-        return f'"{keyword}" 会社概要 拠点 支店'
+        return f'"{keyword}" 拠点 支店 営業所 一覧'
 
 # ==========================================
 # 2. 検索関数
@@ -76,46 +75,34 @@ def search_ddg_lite(expanded_query: str):
                     current_title = ""; current_url = ""
         
         if not results: return None, "検索結果を取得できませんでした。"
-        context = "\n".join([f"- タイトル: {r['title']}\n  内容: {r['snippet']}\n  URL: {r['url']}" for r in results[:6]])
+        context = "\n".join([f"- タイトル: {r['title']}\n  内容: {r['snippet']}\n  URL: {r['url']}" for r in results[:8]])
         return context, None
     except Exception as e:
         return None, f"検索エラー: {str(e)}"
 
 # ==========================================
-# 3. Pythonによる物理バリデーション（前株・後株の厳格チェック）
+# 3. バリデーション関数（法人格の厳格チェックのみに絞る）
 # ==========================================
 def validate_corporate_match(user_query: str, result: dict):
-    """
-    ユーザーが入力した法人格の形式（前株か後株か）と、
-    AIが取得した結果の企業名が一致しているかをPython側で強制チェックし、
-    異なる場合は問答無用で非該当（is_found = False）に書き換える
-    """
     cleaned_query = user_query.replace(" ", "")
     
-    # ユーザーが「前株（株式会社〇〇）」で入力した場合
+    # 前株・後株の物理チェック（ユーザー入力と完全に異なる形式の誤認を防ぐ）
     if cleaned_query.startswith("株式会社"):
         core_name = cleaned_query.replace("株式会社", "")
         wrong_pattern = f"{core_name}株式会社" # 後株
         
-        # details内の企業名をチェック
         valid_details = []
         for d in result.get('details', []):
             name = d.get('name', '').replace(" ", "")
-            # 後株のパターンが含まれていて、かつ前株の正しい名前が含まれていない場合は除外
             if wrong_pattern in name and cleaned_query not in name:
                 continue
             valid_details.append(d)
-            
         result['details'] = valid_details
         
-        # 推論テキストや詳細に後株の誤認が含まれている場合もブロック
-        reasoning = result.get('reasoning', '')
-        if wrong_pattern in reasoning and cleaned_query not in reasoning:
+        if wrong_pattern in result.get('reasoning', '') and cleaned_query not in result.get('reasoning', ''):
             result['is_found'] = False
-            result['reasoning'] = f"入力された前株形式（{user_query}）と一致する企業情報が確認できなかったため除外しました。"
             result['details'] = []
 
-    # ユーザーが「後株（〇〇株式会社）」で入力した場合
     elif cleaned_query.endswith("株式会社"):
         core_name = cleaned_query.replace("株式会社", "")
         wrong_pattern = f"株式会社{core_name}" # 前株
@@ -126,13 +113,10 @@ def validate_corporate_match(user_query: str, result: dict):
             if wrong_pattern in name and cleaned_query not in name:
                 continue
             valid_details.append(d)
-            
         result['details'] = valid_details
         
-        reasoning = result.get('reasoning', '')
-        if wrong_pattern in reasoning and cleaned_query not in reasoning:
+        if wrong_pattern in result.get('reasoning', '') and cleaned_query not in result.get('reasoning', ''):
             result['is_found'] = False
-            result['reasoning'] = f"入力された後株形式（{user_query}）と一致する企業情報が確認できなかったため除外しました。"
             result['details'] = []
 
     return result
@@ -151,14 +135,14 @@ def analyze_company_with_ai(query, web_context, gemini_key):
 
     指示:
     1. 検索結果から「企業公式サイト(Official HP)」のURLを特定し、"official_url" に格納してください（見つからない場合は null）。
-    2. 【最重要：法人格の厳格一致】ユーザーが入力した法人格の形（前株か後株か）を完全に一致させてください。例えば「株式会社ニデック」と入力された場合、「ニデック株式会社」は別法人として扱ってください。
-    3. 入力された企業名と完全に一致する企業が、九州に直営拠点を持っているか調査してください。
+    2. 【最重要：法人格の厳格一致】ユーザーが入力した法人格の形（前株か後株か）を厳守してください（例: 「株式会社ニデック」と「ニデック株式会社」は別法人）。
+    3. Web検索結果の断片から、その企業が九州（福岡, 佐賀, 長崎, 熊本, 大分, 宮崎, 鹿児島）に支店、営業所、工場などの直営拠点を持っているか注意深く探してください。少しでも九州の拠点情報が含まれていれば "is_found": true としてください。
     4. 必ず以下のJSONフォーマットのみで回答してください。
     
     {{
         "is_found": trueまたはfalse,
         "official_url": "公式サイトのURLまたはnull",
-        "reasoning": "判定理由",
+        "reasoning": "判定理由（九州拠点の有無について具体的に記載）",
         "details": [{{"name": "企業名・拠点名", "address": "住所", "url": "URL"}}],
         "sales_keywords": ["キーワード1", "キーワード2", "キーワード3", "キーワード4", "キーワード5", "キーワード6", "キーワード7", "キーワード8", "キーワード9", "キーワード10"]
     }}
@@ -174,7 +158,6 @@ def analyze_company_with_ai(query, web_context, gemini_key):
     text = re.sub(r"```json", "", text).replace("```", "").strip()
     raw_result = json.loads(text)
     
-    # ★Pythonによる物理バリデーションを通す★
     return validate_corporate_match(query, raw_result)
 
 # ==========================================
@@ -246,7 +229,7 @@ if submit_button:
             st.markdown(f"### 🌐 公式サイト\n[{official_url}]({official_url})")
 
         if result.get('is_found'):
-            st.success(f"⭕ 入力された法人名と一致し、九州拠点が確認されました。")
+            st.success(f"⭕ 九州拠点が確認されました。")
             st.info(f"**判定理由:** {result.get('reasoning')}")
             
             keywords = result.get('sales_keywords', [])
@@ -263,7 +246,7 @@ if submit_button:
                     if d.get('url'):
                         st.markdown(f"[詳細リンク]({d.get('url')})")
         else:
-            st.error(f"❌ 入力された法人名に完全一致する九州拠点は確認されませんでした。")
+            st.error(f"❌ 九州拠点は確認されませんでした。")
             st.write(f"**判定理由:** {result.get('reasoning')}")
             
             keywords = result.get('sales_keywords', [])
