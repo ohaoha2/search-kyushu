@@ -25,7 +25,6 @@ kyushu_prefectures = ["福岡", "佐賀", "長崎", "熊本", "大分", "宮崎"
 def is_excluded_domain(domain: str):
     if not domain: return True
     
-    # 1. 完全一致 or 後方一致のブラックリスト
     excluded_domains = [
         "wikipedia.org", "yahoo.co.jp", "news.yahoo.co.jp", "nikkei.com", "toyokeizai.net",
         "mynavi.jp", "rikunabi.com", "en-japan.com", "wantedly.com", "indeed.com",
@@ -39,7 +38,6 @@ def is_excluded_domain(domain: str):
     if any(domain == excluded or domain.endswith("." + excluded) for excluded in excluded_domains):
         return True
         
-    # 2. ドメインの文字列に含まれるNGパターン（自治体、大学、就活ポータル等）
     ng_substrings = ["shukatsu", "tenshoku", "syukatsu"]
     ng_suffixes = [".lg.jp", ".ac.jp", ".go.jp"]
     
@@ -74,23 +72,20 @@ def search_company_info(company_info: dict, api_key: str):
     company_name = company_info["name"]
     context = company_info["context"]
 
-    # Q1: 会社概要ページ検索
+    # ★入力された社名（前株・後株の形式）をそのまま正確に検索クエリに反映
     q1_query = f'"{company_name}" {context} 会社概要 企業情報 公式サイト'
     q1_results = fetch_tavily_results(q1_query, api_key)
     
-    # AIに渡すための「綺麗な検索結果（ゴミサイト除外済）」を作成
     clean_q1 = []
     for r in q1_results:
         domain = extract_domain(r["url"])
         if not is_excluded_domain(domain):
             clean_q1.append(r)
     
-    # Q2のための公式ドメイン推定（綺麗な結果の1件目のドメインを採用）
     official_domain = None
     if clean_q1:
         official_domain = extract_domain(clean_q1[0]["url"])
     
-    # Q2: 拠点検索
     q2_results = []
     if official_domain:
         q2_query = f'site:{official_domain} 拠点 OR 事業所 OR 支店 OR 営業所 OR 福岡 OR 九州'
@@ -98,7 +93,7 @@ def search_company_info(company_info: dict, api_key: str):
 
     return {
         "official_domain": official_domain,
-        "q1_results": clean_q1,  # AIには複数渡して一番良いものを選ばせる
+        "q1_results": clean_q1,
         "q2_results": q2_results
     }
 
@@ -110,7 +105,6 @@ def analyze_companies_batch(batch_data, gemini_key):
     prompt_targets = ""
 
     for i, item in enumerate(batch_data):
-        # 綺麗な上位5件をAIに渡し、AIの知能で「会社概要URL」を選ばせる
         q1_text = "\n".join([f"- URL: {r['url']}\n  内容: {r['snippet']}" for r in item.get("q1_results", [])[:5]])
         q2_text = "\n".join([f"- URL: {r['url']}\n  内容: {r['snippet']}" for r in item.get("q2_results", [])[:5]])
         
@@ -121,7 +115,6 @@ def analyze_companies_batch(batch_data, gemini_key):
             f"【拠点・事業所情報】\n{q2_text if q2_text else '情報なし'}\n"
         )
 
-    # ★プロンプトの修正: 拠点ルールの具体例を追加し、過剰な除外を防ぐ
     template = """
 あなたは企業の所在調査とIT提案のプロフェッショナルです。
 以下の複数企業について調査し、必ずJSON配列で返してください。
@@ -129,15 +122,18 @@ def analyze_companies_batch(batch_data, gemini_key):
 {prompt_targets}
 
 1. "input_company": 入力された会社名。
-2. "correct_company_name": 情報から確認できる正しい正式名称（例：株式会社〇〇）。
+2. "correct_company_name": 情報から確認できる正しい正式名称。
+【超重要・正式名称のルール】
+「株式会社〇〇（前株）」と「〇〇株式会社（後株）」は全く異なる別法人の可能性があります。
+入力された会社名の「株式会社の位置（前株か後株か）」および文字の完全な一致を確認し、**入力された名称と完全に同一の法人**の正式名称を記載してください。別法人の名称に勝手に書き換えては絶対にいけません。
 3. "profile_url": 【会社概要ページ情報】のURLリストの中から、「会社概要」や「企業情報」に最も該当する、対象企業本体の公式URLを1つ記載。なければnull。
 4. "details": 九州内（福岡,佐賀,長崎,熊本,大分,宮崎,鹿児島）の稼働中の拠点情報。
 【超重要・拠点判定のルール】
-入力された会社名または正しい正式名称と**完全に同一の法人**の拠点のみをリストアップしてください。
-- 〇 含める例：「株式会社〇〇 福岡支店」「株式会社〇〇 リフォーム事業部 博多」（部署名や事業所名が付いているだけなら同一法人なので含める）
-- ✕ 含めない例：「〇〇テクノモータ株式会社」「〇〇ファシリティーズ株式会社」（別法人の子会社やグループ会社は絶対に除外）
+入力された会社名と**一字一句完全に一致する法人**の拠点のみをリストアップしてください。
+- 〇 含める例：「株式会社〇〇 福岡支店」（入力が前株なら前株の法人）、「〇〇株式会社 九州支店」（入力が後株なら後株の法人）
+- ✕ 含めない例：別法人の拠点、グループ会社、子会社
 [{"name": "拠点名称", "address": "住所", "url": "その情報を裏付けるURL"}]
-5. "reason": なぜ九州拠点がある・ない・不明と判断したかの理由（1文）。グループ会社の拠点しかない場合は「グループ会社の拠点は確認できたが、本体の拠点はない」としてください。
+5. "reason": なぜ九州拠点がある・ない・不明と判断したかの理由（1文）。
 6. "department_keywords": 対象企業の主要部署（最大4つ）に対し、ITツール（DX等）を提案するためのフックキーワードを3つずつ。
 [{"department": "営業部", "keywords": ["SFA導入", "オンライン商談", "名刺管理"]}]
 7. "notes": 社名変更などの特記事項。なければ[]。
@@ -192,14 +188,12 @@ if submit_button:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # 検索フェーズ
         status_text.text("検索中...")
         fetched_data = []
         for i, comp_info in enumerate(company_list):
             fetched_data.append({"company": comp_info, **search_company_info(comp_info, tavily_api_key)})
             progress_bar.progress(((i + 1) / len(company_list)) * 0.5)
 
-        # 分析フェーズ
         status_text.text("AI分析中...")
         company_map = {}
         chunk_size = 5
@@ -211,22 +205,18 @@ if submit_button:
                     if r.get("input_company"): company_map[r["input_company"]] = r
             progress_bar.progress(0.5 + ((i + len(chunk)) / len(fetched_data)) * 0.5)
 
-        # 結果の整形
         batch_results = []
         for comp_info in company_list:
             comp_name = comp_info["name"]
             res = company_map.get(comp_name, {})
 
-            # 正式名称の判定
             correct_name = res.get("correct_company_name", comp_name)
-            clean_comp_name = comp_name.replace(" ", "").replace(" ", "").replace("株式会社", "").replace("（株）", "")
-            clean_correct_name = correct_name.replace(" ", "").replace(" ", "").replace("株式会社", "").replace("（株）", "")
             
-            if clean_comp_name == clean_correct_name:
+            # ★厳密な比較（前株・後株の位置も含めて完全に一致しているか）
+            if comp_name == correct_name:
                 name_judgement = "〇"
             else:
                 name_judgement = f"✕ ({correct_name})"
-
 
             valid_details = [d for d in res.get("details", []) if isinstance(d, dict) and d.get("name") and any(p in d.get("address", "") for p in kyushu_prefectures)]
             details_summary = ", ".join(f"{d.get('name')} ({d.get('address')})" for d in valid_details)
