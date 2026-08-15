@@ -177,6 +177,7 @@ def fetch_tavily_results(
 
 # ==========================================
 # 会社名の前株・後株情報
+# ※検索候補を落とす用途には使わない
 # ==========================================
 def parse_company_position(
     company_name: str
@@ -341,6 +342,7 @@ def find_official_candidates(
         reverse=True
     )
 
+    # ドメイン重複削除
     unique_candidates = []
 
     seen_domains = set()
@@ -363,24 +365,26 @@ def find_official_candidates(
 
 # ==========================================
 # 会社検索
-# ※検索回数は変更しない
 # ==========================================
 def search_multi_queries(
     company: str,
     api_key: str
 ):
 
-# Q1
-q1 = (
-    f'"{company}" '
-    f'"{company}" 会社概要 会社情報 企業情報'
-)
+    # ======================================
+    # Q1：会社概要・公式サイト
+    #
+    # ★今回変更したのはここだけ
+    # ======================================
+    q1 = (
+        f'"{company}" '
+        f'会社概要 会社情報 企業情報'
+    )
 
-# official_domains
-official_domains = [
-    candidate["domain"]
-    for candidate in official_candidates[:1]
-]
+    res1 = fetch_tavily_results(
+        q1,
+        api_key
+    )
 
     # ======================================
     # 公式ドメイン候補
@@ -392,19 +396,24 @@ official_domains = [
         )
     )
 
+    # ======================================
+    # ★今回変更したのはここだけ
+    #
+    # スコア10未満で候補を捨てない
+    # 候補1位をそのままQ2に使用
+    # ======================================
     official_domains = []
 
-    for candidate in official_candidates:
+    if official_candidates:
 
-        if candidate["score"] >= 10:
-
-            official_domains.append(
-                candidate["domain"]
-            )
+        official_domains = [
+            official_candidates[0]["domain"]
+        ]
 
     # ======================================
-    # Q2
-    # ※ここは変更しない
+    # Q2：公式ドメイン内の拠点検索
+    #
+    # ★ここは変更しない
     # ======================================
     res2 = []
 
@@ -414,18 +423,21 @@ official_domains = [
 
         q2_queries = [
 
+            # ① 拠点一覧
             (
                 f'site:{domain} '
                 f'拠点一覧 事業所一覧 営業所一覧 '
                 f'支店一覧 営業拠点 国内拠点'
             ),
 
+            # ② 会社情報・所在地
             (
                 f'site:{domain} '
                 f'会社情報 拠点 事業所 支店 支社 営業所 '
                 f'所在地 住所'
             ),
 
+            # ③ 法人営業・事業部
             (
                 f'site:{domain} '
                 f'営業部 営業所 営業拠点 '
@@ -434,6 +446,7 @@ official_domains = [
                 f'事業部'
             ),
 
+            # ④ 九州全体
             (
                 f'site:{domain} '
                 f'九州 福岡 佐賀 長崎 熊本 '
@@ -1139,7 +1152,9 @@ if submit_button:
                     "url": url
                 })
 
+            # --------------------------------
             # 重複除去
+            # --------------------------------
             unique_details = []
 
             seen_details = set()
@@ -1290,6 +1305,7 @@ if submit_button:
                 "特記事項":
                     notes_text,
 
+                # 内部データ
                 "_raw_details":
                     valid_details,
 
