@@ -42,6 +42,36 @@ if "result_cache" not in st.session_state:
 
 
 # ==========================================
+# 法人格一覧
+#
+# 株式会社だけでなく法人格全般を扱う
+# ==========================================
+LEGAL_FORMS = [
+    "株式会社",
+    "有限会社",
+    "合同会社",
+    "合資会社",
+    "合名会社",
+    "一般社団法人",
+    "一般財団法人",
+    "公益社団法人",
+    "公益財団法人",
+    "学校法人",
+    "医療法人",
+    "社会福祉法人",
+    "宗教法人",
+    "特定非営利活動法人",
+    "NPO法人",
+    "独立行政法人",
+    "国立大学法人",
+    "地方独立行政法人",
+    "相互会社",
+    "信用金庫",
+    "信用組合",
+]
+
+
+# ==========================================
 # 第三者サイト除外
 # ==========================================
 def is_excluded_domain(domain: str):
@@ -99,6 +129,205 @@ def extract_domain(url: str):
 
 
 # ==========================================
+# 会社名正規化
+# ==========================================
+def normalize_company_name(name: str):
+
+    if not name:
+        return ""
+
+    name = str(name)
+
+    # 全角・半角スペース除去
+    name = re.sub(
+        r"[\s　]+",
+        "",
+        name
+    )
+
+    # 全角括弧等は極力そのまま維持
+    return name.strip()
+
+
+# ==========================================
+# 法人格情報を抽出
+#
+# 例：
+# 株式会社ニデック
+# → core = ニデック
+# → legal_form = 株式会社
+# → position = front
+#
+# ニデック株式会社
+# → core = ニデック
+# → legal_form = 株式会社
+# → position = back
+# ==========================================
+def parse_legal_entity(name: str):
+
+    normalized = normalize_company_name(
+        name
+    )
+
+    if not normalized:
+        return {
+            "original": "",
+            "core": "",
+            "legal_form": None,
+            "position": "unknown"
+        }
+
+    # 長い法人格から先に確認
+    sorted_forms = sorted(
+        LEGAL_FORMS,
+        key=len,
+        reverse=True
+    )
+
+    for form in sorted_forms:
+
+        if normalized.startswith(form):
+
+            core = normalized[len(form):]
+
+            if core:
+
+                return {
+                    "original": normalized,
+                    "core": core,
+                    "legal_form": form,
+                    "position": "front"
+                }
+
+        if normalized.endswith(form):
+
+            core = normalized[:-len(form)]
+
+            if core:
+
+                return {
+                    "original": normalized,
+                    "core": core,
+                    "legal_form": form,
+                    "position": "back"
+                }
+
+    return {
+        "original": normalized,
+        "core": normalized,
+        "legal_form": None,
+        "position": "unknown"
+    }
+
+
+# ==========================================
+# 候補テキストから法人名候補を判定
+#
+# 「株式会社」だけではなく、
+# 法人格＋位置＋法人名全体を見る
+# ==========================================
+def candidate_entity_relation(
+    input_company: str,
+    candidate_text: str
+):
+    """
+    戻り値：
+
+    "match"
+        入力会社名と同一と考えられる
+
+    "mismatch"
+        同じコア名だが法人格・位置などが異なる
+
+    "unknown"
+        候補テキストから確定できない
+    """
+
+    input_info = parse_legal_entity(
+        input_company
+    )
+
+    if not input_info["core"]:
+        return "unknown"
+
+    text = normalize_company_name(
+        candidate_text
+    )
+
+    input_original = input_info["original"]
+
+    # --------------------------------------
+    # 入力会社名そのものが書かれている
+    # --------------------------------------
+    if input_original and input_original in text:
+        return "match"
+
+    input_core = input_info["core"]
+    input_form = input_info["legal_form"]
+
+    if not input_core:
+        return "unknown"
+
+    # --------------------------------------
+    # 候補テキスト中に
+    # 同じコア＋法人格が存在するか調べる
+    # --------------------------------------
+    for form in sorted(
+        LEGAL_FORMS,
+        key=len,
+        reverse=True
+    ):
+
+        # 前株
+        front_pattern = (
+            re.escape(form)
+            + re.escape(input_core)
+        )
+
+        # 後株
+        back_pattern = (
+            re.escape(input_core)
+            + re.escape(form)
+        )
+
+        has_front = re.search(
+            front_pattern,
+            text
+        )
+
+        has_back = re.search(
+            back_pattern,
+            text
+        )
+
+        if not has_front and not has_back:
+            continue
+
+        # 入力会社と同一法人格・同一位置
+        if (
+            form == input_form
+            and (
+                (
+                    input_info["position"] == "front"
+                    and has_front
+                )
+                or
+                (
+                    input_info["position"] == "back"
+                    and has_back
+                )
+            )
+        ):
+            return "match"
+
+        # 同じコア名だが、
+        # 法人格または位置が異なる
+        return "mismatch"
+
+    return "unknown"
+
+
+# ==========================================
 # Tavily検索
 # ==========================================
 def fetch_tavily_results(
@@ -113,7 +342,10 @@ def fetch_tavily_results(
         )
 
         response = client.search(
-            query=query.strip().replace("`", ""),
+            query=query.strip().replace(
+                "`",
+                ""
+            ),
             search_depth="basic",
             max_results=20
         )
@@ -154,10 +386,7 @@ def fetch_tavily_results(
 
 
 # ==========================================
-# 公式サイト候補スコア
-#
-# ※ここでは候補を完全に決定しない
-# Geminiに判断材料を渡すためのもの
+# 公式候補スコア
 # ==========================================
 def score_official_candidate(
     company: str,
@@ -182,18 +411,35 @@ def score_official_candidate(
     title_lower = title.lower()
     snippet_lower = snippet.lower()
     url_lower = url.lower()
-    company_lower = company.lower()
 
     score = 0
 
     # --------------------------------------
     # 入力会社名そのもの
     # --------------------------------------
-    if company_lower in title_lower:
-        score += 20
+    if normalize_company_name(
+        company
+    ).lower() in title_lower:
+        score += 25
 
-    if company_lower in snippet_lower:
-        score += 10
+    if normalize_company_name(
+        company
+    ).lower() in snippet_lower:
+        score += 15
+
+    # --------------------------------------
+    # 法人格を含む会社名候補
+    # --------------------------------------
+    relation = candidate_entity_relation(
+        company,
+        title + "\n" + snippet
+    )
+
+    if relation == "match":
+        score += 30
+
+    elif relation == "mismatch":
+        score -= 100
 
     # --------------------------------------
     # 会社概要らしいタイトル
@@ -237,7 +483,7 @@ def score_official_candidate(
             score += 3
 
     # --------------------------------------
-    # 第三者サイトは強く減点
+    # 明らかな第三者サイト
     # --------------------------------------
     domain = extract_domain(
         url
@@ -253,6 +499,8 @@ def score_official_candidate(
 
 # ==========================================
 # 公式候補取得
+#
+# ここで明らかな別法人を除外する
 # ==========================================
 def find_official_candidates(
     company: str,
@@ -268,6 +516,16 @@ def find_official_candidates(
             ""
         )
 
+        title = result.get(
+            "title",
+            ""
+        )
+
+        snippet = result.get(
+            "snippet",
+            ""
+        )
+
         domain = extract_domain(
             url
         )
@@ -280,6 +538,24 @@ def find_official_candidates(
         ):
             continue
 
+        candidate_text = (
+            title
+            + "\n"
+            + snippet
+        )
+
+        relation = candidate_entity_relation(
+            company,
+            candidate_text
+        )
+
+        # ----------------------------------
+        # 同じ法人名の逆位置・別法人格など
+        # 明確な不一致は候補から除外
+        # ----------------------------------
+        if relation == "mismatch":
+            continue
+
         score = score_official_candidate(
             company,
             result
@@ -288,15 +564,10 @@ def find_official_candidates(
         candidates.append({
             "score": score,
             "domain": domain,
-            "title": result.get(
-                "title",
-                ""
-            ),
+            "title": title,
             "url": url,
-            "snippet": result.get(
-                "snippet",
-                ""
-            )
+            "snippet": snippet,
+            "entity_relation": relation
         })
 
     candidates.sort(
@@ -304,6 +575,7 @@ def find_official_candidates(
         reverse=True
     )
 
+    # URL重複除去
     unique_candidates = []
 
     seen_urls = set()
@@ -326,8 +598,6 @@ def find_official_candidates(
 
 # ==========================================
 # 会社検索
-#
-# 九州検索は一旦廃止
 # ==========================================
 def search_company(
     company: str,
@@ -335,11 +605,11 @@ def search_company(
 ):
 
     # --------------------------------------
-    # Q1：会社概要・公式サイト検索
+    # Q1：会社概要・公式サイト
+    # ※検索回数は1社1回
     # --------------------------------------
     q1 = (
-        f'"{company}" '
-        f'会社概要 公式サイト'
+        f'"{company}" 会社概要 公式サイト'
     )
 
     q1_results = fetch_tavily_results(
@@ -423,7 +693,9 @@ def analyze_companies_batch(
                     f"  URL: "
                     f"{r.get('url', '')}\n"
                     f"  内容: "
-                    f"{r.get('snippet', '')}"
+                    f"{r.get('snippet', '')}\n"
+                    f"  システム判定: "
+                    f"{r.get('entity_relation', 'unknown')}"
                 )
                 for r in item.get(
                     "q1_results",
@@ -456,38 +728,75 @@ def analyze_companies_batch(
         )
 
     prompt = f"""
-あなたは企業情報調査の専門家です。
+あなたは企業情報調査とDX営業提案の専門家です。
 
-提供された検索結果だけを使って判定してください。
+提供された検索結果だけを使って判断してください。
 情報を推測・補完してはいけません。
 
 
 ==================================================
-【最重要：法人名の照合】
+【最重要：正式法人名の照合】
 ==================================================
 
-入力された会社名と、
-検索結果から確認できる法人名を厳密に照合してください。
+入力会社名と検索結果に現れる法人名を照合してください。
 
-特に株式会社の位置を絶対に間違えないでください。
+法人格は必ず考慮してください。
 
-例：
+例えば、
 
-入力：
 株式会社ニデック
-
-法人名：
-株式会社ニデック
-→ 〇 一致
-
-法人名：
 ニデック株式会社
-→ ✕ 不一致
 
-この2社を同じ会社として扱ってはいけません。
+は別法人です。
 
-入力会社名と正式法人名の「株式会社」の位置が異なる場合、
-必ず「✕ 不一致」です。
+また、
+
+株式会社〇〇
+合同会社〇〇
+有限会社〇〇
+〇〇株式会社
+〇〇合同会社
+〇〇有限会社
+
+なども別法人です。
+
+
+【法人格の例】
+
+- 株式会社
+- 有限会社
+- 合同会社
+- 合資会社
+- 合名会社
+- 一般社団法人
+- 一般財団法人
+- 公益社団法人
+- 公益財団法人
+- 学校法人
+- 医療法人
+- 社会福祉法人
+- 宗教法人
+- 特定非営利活動法人
+- NPO法人
+- 独立行政法人
+- 国立大学法人
+- 地方独立行政法人
+- 相互会社
+- その他の法人格
+
+
+法人格の種類が違う場合、
+同じコア名称でも「✕ 不一致」です。
+
+
+法人格が同じでも、
+
+株式会社ニデック
+と
+ニデック株式会社
+
+のように位置が異なる場合は
+「✕ 不一致」です。
 
 
 ==================================================
@@ -495,39 +804,39 @@ def analyze_companies_batch(
 ==================================================
 
 official_urlには、
-「入力された会社名の対象企業自身の公式サイトにある
-会社概要ページ」を記載してください。
+入力会社名の対象法人自身の
+「会社概要ページ」を記載してください。
 
 
-最優先するページ：
+優先順位：
 
-- 会社概要
-- 会社情報
-- 企業情報
-- 企業概要
-- Corporate Profile
-- Company Profile
-- About Us
-- About
-- Profile
-- Outline
+1. 会社概要
+2. 会社情報
+3. 企業情報
+4. 企業概要
+5. Corporate Profile
+6. Company Profile
+7. About Us
+8. About
+9. Profile
+10. Outline
 
 
 重要：
 
-official_urlは、検索結果に実際に存在するURLだけを使用してください。
+official_urlは、
+検索結果に実際に存在するURLだけを使用してください。
 
-URLを推測して作ってはいけません。
+URLを推測して作成してはいけません。
 
 
-==================================================
-【第三者サイト禁止】
-==================================================
+対象法人自身の公式サイトを選んでください。
 
-以下のサイトは対象企業の公式サイトではありません。
+以下は対象法人の公式サイトではありません。
 
 - Wikipedia
-- 日本製薬工業協会などの業界団体
+- 業界団体
+- 日本製薬工業協会
 - Baseconnect
 - Compalyze
 - 求人サイト
@@ -539,61 +848,98 @@ URLを推測して作ってはいけません。
 
 例えば、
 
-アステラス製薬株式会社について
+入力：
+アステラス製薬株式会社
+
+検索結果：
+
+https://www.astellas.com/...
+→ 候補
 
 https://www.jpma.or.jp/...
-
-が検索結果にあっても、
-これはアステラス製薬の公式サイトではありません。
-
-official_urlに使用してはいけません。
+→ 第三者サイトなので除外
 
 
 ==================================================
-【会社概要ページの選び方】
+【会社概要URLを選択するときの最重要手順】
 ==================================================
 
-検索結果に対象企業自身の公式ドメインから
+候補ごとに以下を確認してください。
 
-「会社概要」
+① URLのドメインが対象法人自身の公式サイトか
 
-「会社情報」
+② そのURLが会社概要・会社情報・企業情報等のページか
 
-「企業情報」
-
-などのページがある場合、
-そのページを優先してください。
-
-公式トップページしか確認できない場合のみ、
-公式トップページを使用してください。
-
-対象企業自身の公式サイトを確認できない場合は
-nullとしてください。
+③ 検索結果中の法人名が入力会社名と一致しているか
 
 
-==================================================
-【会社概要URLと法人名を同時に確認】
-==================================================
-
-公式URLを選ぶ際には、
-
-1. URLが対象企業自身のドメインである
-2. そのページが会社概要等のページである
-3. ページ上の法人名が入力会社名と一致する
-
-の3点を確認してください。
+3つを満たす候補を優先してください。
 
 
-特に、
+例えば、
 
+入力：
 株式会社ニデック
 
-と
+候補：
+https://www.nidec.com/jp/corporate/about/outline
 
+ページ上の法人名：
 ニデック株式会社
 
-のようなケースでは、
-URLのドメインが似ているだけでは採用してはいけません。
+これは別法人なので採用禁止。
+
+
+一方、
+
+入力：
+株式会社ニトリ
+
+候補：
+https://www.nitori.co.jp/about_us/corporate_data.html
+
+ページ上の法人名：
+株式会社ニトリ
+
+なら採用してください。
+
+
+==================================================
+【候補のシステム判定について】
+==================================================
+
+「システム判定」が mismatch の候補は採用禁止です。
+
+「システム判定」が match の候補を最優先してください。
+
+「unknown」は、
+検索結果だけでは正式法人名が確認できない場合です。
+
+unknownだけの場合、
+無理に一致とせず、
+検索結果を確認した上で慎重に判断してください。
+
+
+==================================================
+【company_match】
+==================================================
+
+以下の3つだけを使用してください。
+
+"〇 一致"
+"✕ 不一致"
+"⚠️確認できず"
+
+
+正式法人名を確認でき、
+入力会社名と完全に一致
+→ 〇 一致
+
+法人格・法人格の位置・法人名が違う
+→ ✕ 不一致
+
+正式法人名が確認できない
+→ ⚠️確認できず
 
 
 ==================================================
@@ -601,12 +947,12 @@ URLのドメインが似ているだけでは採用してはいけません。
 ==================================================
 
 対象企業の事業内容を踏まえ、
-IT営業で提案できる部署を最大4つ作ってください。
+IT営業で提案できる部署を最大4つ。
 
 1部署につき3～4個。
 
 単なる事業内容ではなく、
-その部署に対して何のITを提案できるかを書いてください。
+その部署に何をIT提案するかを書いてください。
 
 
 ==================================================
@@ -616,11 +962,10 @@ IT営業で提案できる部署を最大4つ作ってください。
 2023年8月14日以降の重要事項のみ。
 
 - 社名変更
-- 拠点新設
-- 拠点移転
 - M&A
 - 組織再編
 - 新規事業
+- 拠点新設・移転
 - 大規模設備投資
 
 なければ[]。
@@ -632,8 +977,6 @@ IT営業で提案できる部署を最大4つ作ってください。
 ==================================================
 【JSON】
 ==================================================
-
-必ず以下の形式のJSON配列だけを返してください。
 
 [
   {{
@@ -654,13 +997,11 @@ IT営業で提案できる部署を最大4つ作ってください。
   }}
 ]
 
-company_matchは必ず：
+company_matchは必ず次のいずれか：
 
 「〇 一致」
 「✕ 不一致」
 「⚠️確認できず」
-
-のいずれか。
 """
 
     try:
@@ -824,7 +1165,6 @@ if submit_button:
 
         company_map = {}
 
-        # 429対策
         chunk_size = 5
 
         for start in range(
@@ -1044,7 +1384,6 @@ if submit_button:
                 "特記事項":
                     notes_text,
 
-                # 内部データ
                 "_raw_keywords":
                     department_keywords,
 
@@ -1372,6 +1711,11 @@ if (
                         st.write(
                             f"URL: "
                             f"{candidate.get('url')}"
+                        )
+
+                        st.write(
+                            f"法人関係判定: "
+                            f"{candidate.get('entity_relation')}"
                         )
 
                         st.divider()
