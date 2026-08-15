@@ -370,17 +370,17 @@ def search_multi_queries(
     api_key: str
 ):
 
-    # ======================================
-    # Q1
-    # ======================================
-    q1 = (
-        f'"{company}" 会社概要 公式サイト'
-    )
+# Q1
+q1 = (
+    f'"{company}" '
+    f'"{company}" 会社概要 会社情報 企業情報'
+)
 
-    res1 = fetch_tavily_results(
-        q1,
-        api_key
-    )
+# official_domains
+official_domains = [
+    candidate["domain"]
+    for candidate in official_candidates[:1]
+]
 
     # ======================================
     # 公式ドメイン候補
