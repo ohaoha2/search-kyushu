@@ -189,9 +189,9 @@ def candidate_entity_relation(input_company: str, candidate_text: str):
     return "unknown"
 
 # ==========================================
-# Tavily検索
+# Tavily検索 (ドメイン絞り込み対応)
 # ==========================================
-def fetch_tavily_results(query: str, api_key: str):
+def fetch_tavily_results(query: str, api_key: str, include_domains: list = None):
     try:
         client = TavilyClient(api_key=api_key)
         exclude_list = [
@@ -203,12 +203,17 @@ def fetch_tavily_results(query: str, api_key: str):
             "ipros.com", "atengineer.com", "baseconnect.in", "houjin.jp", "prtimes.jp"
         ]
 
-        response = client.search(
-            query=query.strip().replace("`", ""),
-            search_depth="basic",
-            max_results=20,
-            exclude_domains=exclude_list
-        )
+        params = {
+            "query": query.strip().replace("`", ""),
+            "search_depth": "basic",
+            "max_results": 20,
+            "exclude_domains": exclude_list
+        }
+        
+        if include_domains:
+            params["include_domains"] = include_domains
+
+        response = client.search(**params)
 
         results = []
         for item in response.get("results", []):
@@ -320,15 +325,29 @@ def find_official_candidates(company: str, results: list):
 # ==========================================
 def search_company(company: str, api_key: str):
     
-    # Q1: 会社概要
+    # ① Q1: 会社概要の検索
     q1 = f'"{company}" 会社概要'
     q1_results = fetch_tavily_results(q1, api_key)
 
-    # Q2: 九州拠点
-    q2 = f'"{company}" (九州 OR 福岡 OR 佐賀 OR 長崎 OR 熊本 OR 大分 OR 宮崎 OR 鹿児島) (支店 OR 営業所 OR 拠点 OR 事業所 OR 工場)'
-    q2_results = fetch_tavily_results(q2, api_key)
-
+    # 公式ドメインの特定
     official_candidates = find_official_candidates(company, q1_results)
+    
+    target_domains = None
+    if official_candidates:
+        best_domain = official_candidates[0]["domain"]
+        target_domains = [best_domain]
+
+    # ② Q2: 九州拠点の検索（ドメイン絞り込み）
+    q2_keywords = "(拠点 OR 事業所 OR 支社 OR 支店 OR 営業所 OR 事業部 OR 工場) (九州 OR 福岡 OR 佐賀 OR 長崎 OR 熊本 OR 大分 OR 宮崎 OR 鹿児島)"
+    
+    if target_domains:
+        # ドメイン特定済ならドメイン内検索
+        q2 = q2_keywords
+    else:
+        # 万が一特定できなければ全体検索
+        q2 = f'"{company}" {q2_keywords}'
+
+    q2_results = fetch_tavily_results(q2, api_key, include_domains=target_domains)
 
     return {
         "q1_results": q1_results,
@@ -442,14 +461,14 @@ official_urlには、入力会社名の対象法人自身の「会社概要ペ�
 【九州拠点】（厳密な抽出）
 ==================================================
 
-Q2検索結果（九州拠点用）から、入力会社名と「完全に同一の法人」が直接保有している、九州地方（福岡、佐賀、長崎、熊本、大分、宮崎、鹿児島）の拠点（支店、営業所、事業所、工場など）の名前を抽出してください。
+Q1検索結果（会社概要）および Q2検索結果（拠点用）の両方から、入力会社名と「完全に同一の法人」が直接保有している、九州地方（福岡、佐賀、長崎、熊本、大分、宮崎、鹿児島）の拠点（支社、支店、営業所、事業所、工場、事業部など）の名前を抽出してください。
 
 【厳格なルール】
 - 子会社、関連会社、グループ会社の拠点は「絶対に」除外してください。
   （例：入力が「株式会社ニトリ」の場合、「株式会社ニトリファシリティーズ」の拠点はNG）
-- 代理店、販売店などの情報も除外してください。
+- 一般向けの小売店舗、代理店、販売店などの情報も除外してください。
 - 該当する拠点がない場合、または別法人の拠点しか見つからない場合は空配列 [] を設定してください。
-- 見つかった場合は、記載されている拠点名（例：「福岡支店」「熊本工場」「法人事業 福岡」など）を文字列の配列として出力してください。
+- 見つかった場合は、記載されている拠点名（例：「福岡支店」「熊本工場」「法人事業部 福岡」など）を文字列の配列として出力してください。
 
 
 ==================================================
@@ -488,7 +507,7 @@ Q2検索結果（九州拠点用）から、入力会社名と「完全に同一
     "company": "入力会社名",
     "official_url": "https://...",
     "company_match": "〇 一致",
-    "kyushu_branches": ["福岡支店", "熊本営業所"],
+    "kyushu_branches": ["福岡支店", "熊本営業所", "法人事業部 福岡"],
     "department_keywords": [
       {{
         "department": "営業部",
@@ -672,7 +691,6 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
     st.subheader("検索・分析結果一覧")
 
     df_display = pd.DataFrame(results)
-    # 表示列の順序を指定（URLが社名判定の左になるように変更）
     expected_columns = ["会社名", "会社概要URL", "社名判定", "九州拠点", "部署別IT提案", "特記事項"]
 
     for col in expected_columns:
