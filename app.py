@@ -305,37 +305,14 @@ def find_official_candidates(company: str, results: list):
 # 会社検索
 # ==========================================
 def search_company(company: str, api_key: str):
-    info = parse_legal_entity(company)
-    
-    # --------------------------------------
-    # Q1：会社概要
-    # --------------------------------------
+    # 前株・後株を厳格にするため "{company}" を維持
     q1 = f'"{company}" 会社概要'
-    
-    # --------------------------------------
-    # Q2：九州拠点
-    # --------------------------------------
-    q2 = f'"{company}" 福岡 OR 佐賀 OR 長崎 OR 熊本 OR 大分 OR 宮崎 OR 鹿児島 支店 OR 営業所 OR 拠点 OR 工場'
-
-    # 逆の位置の法人名を除外キーワード（マイナス検索）として付与
-    if info["legal_form"] and info["core"]:
-        if info["position"] == "front":
-            opposite_company = f"{info['core']}{info['legal_form']}"
-            q1 += f' -"{opposite_company}"'
-            q2 += f' -"{opposite_company}"'
-        elif info["position"] == "back":
-            opposite_company = f"{info['legal_form']}{info['core']}"
-            q1 += f' -"{opposite_company}"'
-            q2 += f' -"{opposite_company}"'
 
     q1_results = fetch_tavily_results(q1, api_key)
-    q2_results = fetch_tavily_results(q2, api_key)
-    
     official_candidates = find_official_candidates(company, q1_results)
 
     return {
         "q1_results": q1_results,
-        "q2_results": q2_results,
         "official_candidates": official_candidates
     }
 
@@ -361,13 +338,8 @@ def analyze_companies_batch(batch_data, gemini_key):
 
     for i, item in enumerate(batch_data):
         q1_text = "\n".join([
-            f"- タイトル: {r.get('title', '')}\n  内容: {r.get('snippet', '')}"
+            f"- タイトル: {r.get('title', '')}\n  URL: {r.get('url', '')}\n  内容: {r.get('snippet', '')}\n  システム判定: {r.get('entity_relation', 'unknown')}"
             for r in item.get("q1_results", [])[:20]
-        ])
-        
-        q2_text = "\n".join([
-            f"- タイトル: {r.get('title', '')}\n  内容: {r.get('snippet', '')}"
-            for r in item.get("q2_results", [])[:15]
         ])
 
         candidates_text = json.dumps(item.get("official_candidates", []), ensure_ascii=False, indent=2)
@@ -376,8 +348,7 @@ def analyze_companies_batch(batch_data, gemini_key):
             f"\n=== 対象企業 {i + 1} ===\n"
             f"【入力会社名】\n{item['company']}\n\n"
             f"【公式サイト候補】\n{candidates_text}\n\n"
-            f"【Q1検索結果 (会社概要)】\n{q1_text if q1_text else 'なし'}\n\n"
-            f"【Q2検索結果 (九州拠点)】\n{q2_text if q2_text else 'なし'}\n"
+            f"【Q1検索結果】\n{q1_text if q1_text else 'なし'}\n"
         )
 
     prompt = f"""
@@ -388,39 +359,52 @@ def analyze_companies_batch(batch_data, gemini_key):
 【最重要：正式法人名の照合】
 ==================================================
 入力会社名と検索結果に現れる法人名を照合してください。
-法人格は必ず考慮してください。（例：株式会社ニデック と ニデック株式会社 は別法人）
+法人格は必ず考慮してください。
+例えば、
+株式会社ニデック
+ニデック株式会社
+は別法人です。
 
 ==================================================
 【official_url】
 ==================================================
-対象法人自身の「会社概要ページ」等、実際に存在するURLだけを使用してください。推測作成は禁止。
+official_urlには、入力会社名の対象法人自身の「会社概要ページ」を記載してください。
+重要：official_urlは、検索結果に実際に存在するURLだけを使用してください。推測作成は禁止。
+第三者サイト（Wikipedia、業界団体、求人サイト等）は除外してください。
+
+==================================================
+【会社概要URLを選択するときの最重要手順】
+==================================================
+① URLのドメインが対象法人自身の公式サイトか
+② そのURLが会社概要・会社情報・企業情報等のページか
+③ 検索結果中の法人名が入力会社名と一致しているか
+上記を満たす候補を優先してください。
+
+==================================================
+【候補のシステム判定について】
+==================================================
+「システム判定」が mismatch の候補は採用禁止です。
+「システム判定」が match の候補を最優先してください。
+「unknown」の場合は、検索結果を確認した上で慎重に判断してください。
 
 ==================================================
 【company_match】
 ==================================================
+以下の3つだけを使用してください。
 "〇 一致" （正式法人名を確認でき、入力会社名と完全に一致）
 "✕ 不一致" （法人格・法人格の位置・法人名が違う）
 "⚠️確認できず" （正式法人名が確認できない）
 
 ==================================================
-【九州拠点（沖縄除く）】
-==================================================
-検索結果から、対象法人「直営」の九州地方にある拠点名（支店、営業所、工場など）を抽出してください。
-- 対象：福岡県、佐賀県、長崎県、熊本県、大分県、宮崎県、鹿児島県
-- 除外：沖縄県は含めないでください。
-- 除外：子会社、関連会社、販売代理店などの拠点は絶対に含めないでください。
-- 拠点名のみを簡潔にリスト化してください。（例：「福岡支店」「熊本営業所」）
-- 確認できない場合は空のリスト [] を出力してください。
-
-==================================================
 【部署別IT提案】
 ==================================================
 対象企業の事業内容を踏まえ、IT営業で提案できる部署を最大4つ。1部署につき3～4個。
+単なる事業内容ではなく、その部署に何をIT提案するかを書いてください。
 
 ==================================================
 【特記事項】
 ==================================================
-2023年8月14日以降の重要事項のみ（社名変更、M&A、組織再編など）。なければ[]。
+2023年8月14日以降の重要事項のみ（社名変更、M&A、組織再編、新規事業等）。なければ[]。
 
 {prompt_targets}
 
@@ -432,13 +416,13 @@ def analyze_companies_batch(batch_data, gemini_key):
     "company": "入力会社名",
     "official_url": "https://...",
     "company_match": "〇 一致",
-    "kyushu_branches": ["福岡支店", "熊本営業所"],
     "department_keywords": [
       {{
         "department": "営業部",
         "keywords": [
           "SFA導入",
-          "顧客管理DX"
+          "顧客管理DX",
+          "商談進捗管理"
         ]
       }}
     ],
@@ -494,7 +478,7 @@ if submit_button:
         # ==================================
         # Tavily検索フェーズ
         # ==================================
-        status.text("会社概要および九州拠点を検索中...")
+        status.text("会社概要を検索中...")
         fetched_data = []
 
         for i, company in enumerate(company_list):
@@ -502,7 +486,6 @@ if submit_button:
             fetched_data.append({
                 "company": company,
                 "q1_results": search_data["q1_results"],
-                "q2_results": search_data["q2_results"],
                 "official_candidates": search_data["official_candidates"]
             })
             progress.progress(((i + 1) / max(len(company_list), 1)) * 0.5)
@@ -510,7 +493,7 @@ if submit_button:
         # ==================================
         # Gemini分析フェーズ
         # ==================================
-        status.text("AIによる情報抽出・社名照合中...")
+        status.text("AIによる会社概要・社名照合中...")
         company_map = {}
         chunk_size = 5
 
@@ -533,7 +516,7 @@ if submit_button:
         for company in company_list:
             fetched_item = next((item for item in fetched_data if item["company"] == company), None)
             if fetched_item is None:
-                fetched_item = {"q1_results": [], "q2_results": [], "official_candidates": []}
+                fetched_item = {"q1_results": [], "official_candidates": []}
 
             result = company_map.get(company, {})
 
@@ -545,15 +528,6 @@ if submit_button:
             if company_match not in ["〇 一致", "✕ 不一致", "⚠️確認できず"]:
                 company_match = "⚠️確認できず"
 
-            # 九州拠点の処理
-            kyushu_branches = result.get("kyushu_branches", [])
-            if not isinstance(kyushu_branches, list):
-                kyushu_branches = []
-            kyushu_text = "、".join([str(x).strip() for x in kyushu_branches if str(x).strip()])
-            if not kyushu_text:
-                kyushu_text = "確認できず"
-
-            # 部署別IT提案の処理
             department_keywords = result.get("department_keywords", [])
             if not isinstance(department_keywords, list):
                 department_keywords = []
@@ -578,7 +552,6 @@ if submit_button:
 
             department_text = "\n".join(department_summary)
 
-            # 特記事項の処理
             notes = result.get("notes", [])
             if not isinstance(notes, list):
                 notes = []
@@ -588,14 +561,12 @@ if submit_button:
                 "会社名": company,
                 "社名判定": company_match,
                 "会社概要URL": official_url,
-                "九州拠点": kyushu_text,
+                "九州拠点": "一旦調査対象外",
                 "部署別IT提案": department_text,
                 "特記事項": notes_text,
-                "_raw_kyushu": kyushu_branches,
                 "_raw_keywords": department_keywords,
                 "_raw_notes": notes_text,
                 "_q1_results": fetched_item["q1_results"],
-                "_q2_results": fetched_item["q2_results"],
                 "_official_candidates": fetched_item["official_candidates"]
             })
 
@@ -664,11 +635,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
             else:
                 st.write("**会社概要URL:** 確認できず")
 
-            # 九州拠点
-            if row.get("_raw_kyushu"):
-                st.markdown(f"**九州拠点:** {row['九州拠点']}")
-            else:
-                st.write(f"**九州拠点:** {row['九州拠点']}")
+            st.info("九州拠点の調査は一旦保留しています。")
 
             # 部署別IT提案
             if row.get("_raw_keywords"):
@@ -688,27 +655,14 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
             if row.get("_raw_notes"):
                 st.info(f"**特記事項:** {row['_raw_notes']}")
 
-            # デバッグ：Q1 (会社概要)
-            with st.expander("🔎 デバッグ：会社概要検索結果 (Q1)"):
+            # デバッグ：Q1
+            with st.expander("🔎 デバッグ：会社概要・公式サイト検索結果"):
                 q1_results = row.get("_q1_results", [])
                 if not q1_results:
                     st.write("検索結果なし")
                 else:
                     for idx, result in enumerate(q1_results, start=1):
                         st.markdown(f"### Q1-{idx}")
-                        st.write(f"**タイトル:** {result.get('title', '')}")
-                        st.write(f"**URL:** {result.get('url', '')}")
-                        st.write(f"**内容:** {result.get('snippet', '')}")
-                        st.divider()
-
-            # デバッグ：Q2 (九州拠点)
-            with st.expander("🔎 デバッグ：九州拠点検索結果 (Q2)"):
-                q2_results = row.get("_q2_results", [])
-                if not q2_results:
-                    st.write("検索結果なし")
-                else:
-                    for idx, result in enumerate(q2_results, start=1):
-                        st.markdown(f"### Q2-{idx}")
                         st.write(f"**タイトル:** {result.get('title', '')}")
                         st.write(f"**URL:** {result.get('url', '')}")
                         st.write(f"**内容:** {result.get('snippet', '')}")
