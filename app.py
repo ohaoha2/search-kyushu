@@ -661,17 +661,24 @@ def search_company(
 # ==========================================
 # JSONパース
 # ==========================================
-def safe_parse_json(
-    text
-):
+def safe_parse_json(text):
 
     try:
 
-        return json.loads(
-            text
-        )
+        return json.loads(text)
 
     except json.JSONDecodeError:
 
-        text = re.sub(
-            r"```json|
+        # コピペ時の自動改行エラーを防ぐため、正規表現ではなくreplaceを使用
+        text = text.replace("```json", "").replace("```", "").strip()
+
+        match = re.search(
+            r"\[.*\]|\{.*\}",
+            text,
+            re.DOTALL
+        )
+
+        if match:
+            return json.loads(match.group(0))
+
+        raise
