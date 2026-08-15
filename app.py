@@ -207,11 +207,13 @@ def fetch_tavily_results(query: str, api_key: str, include_domains: list = None)
             "query": query.strip().replace("`", ""),
             "search_depth": "basic",
             "max_results": 20,
-            "exclude_domains": exclude_list
         }
         
+        # ドメインが指定されていれば追加、指定されていなければ除外リストを使用
         if include_domains:
             params["include_domains"] = include_domains
+        else:
+            params["exclude_domains"] = exclude_list
 
         response = client.search(**params)
 
@@ -321,33 +323,33 @@ def find_official_candidates(company: str, results: list):
     return unique_candidates[:10]
 
 # ==========================================
-# 会社検索 (Q1:会社概要, Q2:九州拠点)
+# 会社検索 (Q1:会社概要, Q2:九州拠点 - 厳密ドメイン検索)
 # ==========================================
 def search_company(company: str, api_key: str):
     
-    # ① Q1: 会社概要の検索
+    # ① Q1: 会社概要の検索（Web全体から公式サイトを探す）
     q1 = f'"{company}" 会社概要'
     q1_results = fetch_tavily_results(q1, api_key)
 
-    # 公式ドメインの特定
+    # 公式サイト候補を抽出
     official_candidates = find_official_candidates(company, q1_results)
     
     target_domains = None
     if official_candidates:
+        # 一番スコアの高い公式サイトのドメインを取得
         best_domain = official_candidates[0]["domain"]
         target_domains = [best_domain]
 
-    # ② Q2: 九州拠点の検索（ドメイン絞り込み）
-    q2_keywords = "(拠点 OR 事業所 OR 支社 OR 支店 OR 営業所 OR 事業部 OR 工場) (九州 OR 福岡 OR 佐賀 OR 長崎 OR 熊本 OR 大分 OR 宮崎 OR 鹿児島)"
+    # ② Q2: 九州拠点の検索（特定した公式サイト内のみを検索）
+    # Tavilyのエラーを防ぐため、カッコ()を使わずにフラットに並べる
+    q2 = f'"{company}" 九州 OR 福岡 OR 佐賀 OR 長崎 OR 熊本 OR 大分 OR 宮崎 OR 鹿児島 拠点 OR 支社 OR 支店 OR 営業所 OR 事業所 OR 事業部 OR 工場'
     
     if target_domains:
-        # ドメイン特定済ならドメイン内検索
-        q2 = q2_keywords
+        # 公式ドメイン内のみで検索を実行（求人サイトなどのノイズを完全排除）
+        q2_results = fetch_tavily_results(q2, api_key, include_domains=target_domains)
     else:
-        # 万が一特定できなければ全体検索
-        q2 = f'"{company}" {q2_keywords}'
-
-    q2_results = fetch_tavily_results(q2, api_key, include_domains=target_domains)
+        # 公式サイトが特定できなかった場合は、ノイズ混入を防ぐためQ2は実行しない
+        q2_results = []
 
     return {
         "q1_results": q1_results,
@@ -411,7 +413,7 @@ def analyze_companies_batch(batch_data, gemini_key):
             f"【入力会社名】\n{item['company']}\n\n"
             f"【公式サイト候補】\n{candidates_text}\n\n"
             f"【Q1検索結果（会社概要用）】\n{q1_text if q1_text else 'なし'}\n\n"
-            f"【Q2検索結果（九州拠点用）】\n{q2_text if q2_text else 'なし'}\n"
+            f"【Q2検索結果（公式ドメイン内 九州拠点用）】\n{q2_text if q2_text else '公式サイト特定不可のため未実行'}\n"
         )
 
     prompt = f"""
@@ -461,7 +463,7 @@ official_urlには、入力会社名の対象法人自身の「会社概要ペ�
 【九州拠点】（厳密な抽出）
 ==================================================
 
-Q1検索結果（会社概要）および Q2検索結果（拠点用）の両方から、入力会社名と「完全に同一の法人」が直接保有している、九州地方（福岡、佐賀、長崎、熊本、大分、宮崎、鹿児島）の拠点（支社、支店、営業所、事業所、工場、事業部など）の名前を抽出してください。
+Q1検索結果（会社概要）および Q2検索結果（公式ドメイン内検索）の両方から、入力会社名と「完全に同一の法人」が直接保有している、九州地方（福岡、佐賀、長崎、熊本、大分、宮崎、鹿児島）の拠点（支社、支店、営業所、事業所、工場、事業部など）の名前を抽出してください。
 
 【厳格なルール】
 - 子会社、関連会社、グループ会社の拠点は「絶対に」除外してください。
