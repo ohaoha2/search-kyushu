@@ -65,20 +65,22 @@ LEGAL_FORMS = [
 ]
 
 # ==========================================
-# 第三者サイト除外
+# 第三者サイト除外（最小限）
+# 就活サイト・ニュースサイトは検索対象になる可能性があるため除外しない
 # ==========================================
 def is_excluded_domain(domain: str):
 
     if not domain:
         return True
 
+    # 純粋な機械収集の企業データベースのみに絞る
     excluded_domains = [
-        "wikipedia.org", "yahoo.co.jp", "news.yahoo.co.jp", "nikkei.com",
-        "toyokeizai.net", "mynavi.jp", "rikunabi.com", "en-japan.com",
-        "wantedly.com", "indeed.com", "onecareer.jp", "doda.jp",
-        "bizreach.jp", "green-japan.com", "metoree.com", "navitime.co.jp",
-        "irbank.net", "xn--pckua2a7gp15o89zb.com", "pr.mono.ipros.com", 
-        "ipros.com", "atengineer.com", "baseconnect.in", "houjin.jp", "prtimes.jp"
+        "wikipedia.org", 
+        "irbank.net", 
+        "compalyze.co.jp", 
+        "houjin.jp", 
+        "xn--pckua2a7gp15o89zb.com", # 求人ボックス
+        "baseconnect.in"
     ]
 
     return any(
@@ -147,7 +149,6 @@ def candidate_entity_relation(input_company: str, candidate_text: str):
     input_core = input_info["core"]
     input_form = input_info["legal_form"]
 
-    # 前株・後株の逆パターンを厳密排除
     if input_core and input_form:
         opposite_company = ""
         if input_info["position"] == "front":
@@ -189,19 +190,11 @@ def candidate_entity_relation(input_company: str, candidate_text: str):
     return "unknown"
 
 # ==========================================
-# Tavily検索 (ドメイン絞り込み対応)
+# Tavily検索 (API側の除外リストを廃止・ドメイン指定対応)
 # ==========================================
 def fetch_tavily_results(query: str, api_key: str, include_domains: list = None):
     try:
         client = TavilyClient(api_key=api_key)
-        exclude_list = [
-            "wikipedia.org", "yahoo.co.jp", "news.yahoo.co.jp", "nikkei.com",
-            "toyokeizai.net", "mynavi.jp", "rikunabi.com", "en-japan.com",
-            "wantedly.com", "indeed.com", "onecareer.jp", "doda.jp",
-            "bizreach.jp", "green-japan.com", "metoree.com", "navitime.co.jp",
-            "irbank.net", "xn--pckua2a7gp15o89zb.com", "pr.mono.ipros.com", 
-            "ipros.com", "atengineer.com", "baseconnect.in", "houjin.jp", "prtimes.jp"
-        ]
 
         params = {
             "query": query.strip().replace("`", ""),
@@ -209,11 +202,8 @@ def fetch_tavily_results(query: str, api_key: str, include_domains: list = None)
             "max_results": 20,
         }
         
-        # ドメインが指定されていれば追加、指定されていなければ除外リストを使用
         if include_domains:
             params["include_domains"] = include_domains
-        else:
-            params["exclude_domains"] = exclude_list
 
         response = client.search(**params)
 
@@ -323,11 +313,11 @@ def find_official_candidates(company: str, results: list):
     return unique_candidates[:10]
 
 # ==========================================
-# 会社検索 (Q1:会社概要, Q2:九州拠点 - 厳密ドメイン検索)
+# 会社検索 (Q1:会社概要, Q2:九州拠点 - 厳格ドメイン指定)
 # ==========================================
 def search_company(company: str, api_key: str):
     
-    # ① Q1: 会社概要の検索（Web全体から公式サイトを探す）
+    # ① Q1: 会社概要の検索
     q1 = f'"{company}" 会社概要'
     q1_results = fetch_tavily_results(q1, api_key)
 
@@ -336,16 +326,14 @@ def search_company(company: str, api_key: str):
     
     target_domains = None
     if official_candidates:
-        # 一番スコアの高い公式サイトのドメインを取得
         best_domain = official_candidates[0]["domain"]
         target_domains = [best_domain]
 
-    # ② Q2: 九州拠点の検索（特定した公式サイト内のみを検索）
-    # ドメイン内で絞り込んでいるため、会社名を入れずに拠点名だけで探す
-    q2_keywords = "九州 OR 福岡 OR 佐賀 OR 長崎 OR 熊本 OR 大分 OR 宮崎 OR 鹿児島 拠点 OR 支社 OR 支店 OR 営業所 OR 事業所 OR 事業部 OR 工場"
-    
+    # ② Q2: 九州拠点の検索
     if target_domains:
-        # 公式ドメイン内のみで検索を実行（求人サイトなどのノイズを完全排除）
+        # ドメイン内で絞り込んでいるため、会社名は入れない（略称等の取りこぼしを防ぐ）
+        # Tavilyのパースエラーを防ぐため、OR等を使わずシンプルにスペース区切りでキーワードを列挙
+        q2_keywords = "九州 福岡 佐賀 長崎 熊本 大分 宮崎 鹿児島 拠点 支社 支店 営業所 事業所 事業部 工場"
         q2_results = fetch_tavily_results(q2_keywords, api_key, include_domains=target_domains)
     else:
         # 公式サイトが特定できなかった場合は、ノイズ混入を防ぐためQ2は実行しない
@@ -811,7 +799,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
             with st.expander("🔎 デバッグ：九州拠点検索結果 (Q2)"):
                 q2_results = row.get("_q2_results", [])
                 if not q2_results:
-                    st.write("検索結果なし")
+                    st.write("公式サイト内に該当する拠点ページが見つかりませんでした")
                 else:
                     for idx, result in enumerate(q2_results, start=1):
                         st.markdown(f"### Q2-{idx}")
