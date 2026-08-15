@@ -164,15 +164,15 @@ def fetch_tavily_results(
 
         return results
 
-except Exception as e:
+    except Exception as e:
 
-    st.error(
-        "Gemini APIエラーが発生しました"
-    )
+        st.error(
+            f"Tavily検索エラー: {str(e)}"
+        )
 
-    st.exception(e)
+        st.exception(e)
 
-    return []
+        return []
 
 
 # ==========================================
@@ -797,6 +797,8 @@ Q2の検索結果から、対象企業自身が現在運営している
         st.error(
             f"AI分析バッチ処理エラー: {str(e)}"
         )
+
+        st.exception(e)
 
         return []
 
