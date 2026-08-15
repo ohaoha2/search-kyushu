@@ -164,8 +164,15 @@ def fetch_tavily_results(
 
         return results
 
-    except Exception:
-        return []
+except Exception as e:
+
+    st.error(
+        "Gemini APIエラーが発生しました"
+    )
+
+    st.exception(e)
+
+    return []
 
 
 # ==========================================
