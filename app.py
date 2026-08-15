@@ -96,6 +96,14 @@ def is_excluded_domain(domain: str):
         "green-japan.com",
         "metoree.com",
         "navitime.co.jp",
+        "irbank.net",
+        "xn--pckua2a7gp15o89zb.com",
+        "pr.mono.ipros.com", 
+        "ipros.com",
+        "atengineer.com",
+        "baseconnect.in",
+        "houjin.jp",
+        "prtimes.jp"
     ]
 
     return any(
@@ -609,7 +617,7 @@ def search_company(
     # ※検索回数は1社1回
     # --------------------------------------
     q1 = (
-        f'"{company}" 会社概要 公式サイト'
+        f'"{company}" 会社概要'
     )
 
     q1_results = fetch_tavily_results(
