@@ -378,7 +378,7 @@ def search_multi_queries(
     # ======================================
     q1 = (
         f'"{company}" '
-        f'会社概要 会社情報 企業情報'
+        f'会社概要 公式サイト'
     )
 
     res1 = fetch_tavily_results(
