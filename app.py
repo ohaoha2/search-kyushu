@@ -632,13 +632,13 @@ def search_company(
     q1 = f'"{company}" 会社概要'
 
     # 【重要】逆の位置の法人名を除外キーワード（マイナス検索）として付与
-    if info["legal_form"] and info["core"]:
-        if info["position"] == "front":
-            opposite_company = f"{info['core']}{info['legal_form']}"
-            q1 += f' -"{opposite_company}"'
-        elif info["position"] == "back":
-            opposite_company = f"{info['legal_form']}{info['core']}"
-            q1 += f' -"{opposite_company}"'
+    #if info["legal_form"] and info["core"]:
+     #   if info["position"] == "front":
+      #      opposite_company = f"{info['core']}{info['legal_form']}"
+       #     q1 += f' -"{opposite_company}"'
+        #elif info["position"] == "back":
+         #   opposite_company = f"{info['legal_form']}{info['core']}"
+          #  q1 += f' -"{opposite_company}"'
 
     q1_results = fetch_tavily_results(
         q1,
