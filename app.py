@@ -631,13 +631,14 @@ def search_company(
     # --------------------------------------
     q1 = f'"{company}" 会社概要'
 
-    if info["legal_form"] and info["core"]:
-        if info["position"] == "front":
-            opposite_company = f"{info['core']}{info['legal_form']}"
-            q1 += f' -"{opposite_company}"'
-        elif info["position"] == "back":
-            opposite_company = f"{info['legal_form']}{info['core']}"
-            q1 += f' -"{opposite_company}"'
+    # 【重要】逆の位置の法人名を除外キーワード（マイナス検索）として付与
+    #if info["legal_form"] and info["core"]:
+     #   if info["position"] == "front":
+      #      opposite_company = f"{info['core']}{info['legal_form']}"
+       #     q1 += f' -"{opposite_company}"'
+        #elif info["position"] == "back":
+         #   opposite_company = f"{info['legal_form']}{info['core']}"
+          #  q1 += f' -"{opposite_company}"'
 
     q1_results = fetch_tavily_results(
         q1,
@@ -672,7 +673,11 @@ def safe_parse_json(
 
     except json.JSONDecodeError:
 
-        text = text.replace("```json", "").replace("```", "").strip()
+        text = re.sub(
+            r"```json|```",
+            "",
+            text
+        ).strip()
 
         match = re.search(
             r"\[.*\]|\{.*\}",
@@ -967,7 +972,12 @@ unknownだけの場合、
 【部署別IT提案】
 ==================================================
 
-対象企業の事業内容を踏まえ、IT営業で提案できるツールを1部署につき3～4個。
+対象企業の事業内容を踏まえ、
+IT営業で提案できる部署を最大4つ。
+
+1部署につき3～4個。
+
+単なる事業内容ではなく、
 その部署に何をIT提案するかを書いてください。
 
 
@@ -975,7 +985,16 @@ unknownだけの場合、
 【特記事項】
 ==================================================
 
-直近3年以内の社名変更と変更日を記載。なければ[]。
+2023年8月14日以降の重要事項のみ。
+
+- 社名変更
+- M&A
+- 組織再編
+- 新規事業
+- 拠点新設・移転
+- 大規模設備投資
+
+なければ[]。
 
 
 {prompt_targets}
