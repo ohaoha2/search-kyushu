@@ -39,8 +39,6 @@ if "result_cache" not in st.session_state:
 
 # ==========================================
 # 法人格一覧
-#
-# 株式会社だけでなく法人格全般を扱う
 # ==========================================
 LEGAL_FORMS = [
     "株式会社",
@@ -75,30 +73,12 @@ def is_excluded_domain(domain: str):
         return True
 
     excluded_domains = [
-        "wikipedia.org",
-        "yahoo.co.jp",
-        "news.yahoo.co.jp",
-        "nikkei.com",
-        "toyokeizai.net",
-        "mynavi.jp",
-        "rikunabi.com",
-        "en-japan.com",
-        "wantedly.com",
-        "indeed.com",
-        "onecareer.jp",
-        "doda.jp",
-        "bizreach.jp",
-        "green-japan.com",
-        "metoree.com",
-        "navitime.co.jp",
-        "irbank.net",
-        "xn--pckua2a7gp15o89zb.com",
-        "pr.mono.ipros.com", 
-        "ipros.com",
-        "atengineer.com",
-        "baseconnect.in",
-        "houjin.jp",
-        "prtimes.jp"
+        "wikipedia.org", "yahoo.co.jp", "news.yahoo.co.jp", "nikkei.com",
+        "toyokeizai.net", "mynavi.jp", "rikunabi.com", "en-japan.com",
+        "wantedly.com", "indeed.com", "onecareer.jp", "doda.jp",
+        "bizreach.jp", "green-japan.com", "metoree.com", "navitime.co.jp",
+        "irbank.net", "xn--pckua2a7gp15o89zb.com", "pr.mono.ipros.com", 
+        "ipros.com", "atengineer.com", "baseconnect.in", "houjin.jp", "prtimes.jp"
     ]
 
     return any(
@@ -111,21 +91,14 @@ def is_excluded_domain(domain: str):
 # URL → ドメイン
 # ==========================================
 def extract_domain(url: str):
-
     try:
-
         parsed = urlparse(url)
-
         if not parsed.netloc:
             return None
-
         domain = parsed.netloc.lower()
-
         if domain.startswith("www."):
             domain = domain[4:]
-
         return domain
-
     except Exception:
         return None
 
@@ -133,107 +106,48 @@ def extract_domain(url: str):
 # 会社名正規化
 # ==========================================
 def normalize_company_name(name: str):
-
     if not name:
         return ""
-
     name = str(name)
-
-    # 全角・半角スペース除去
-    name = re.sub(
-        r"[\s ]+",
-        "",
-        name
-    )
-
-    # 全角括弧等は極力そのまま維持
+    name = re.sub(r"[\s ]+", "", name)
     return name.strip()
 
 # ==========================================
 # 法人格情報を抽出
 # ==========================================
 def parse_legal_entity(name: str):
-
-    normalized = normalize_company_name(
-        name
-    )
-
+    normalized = normalize_company_name(name)
     if not normalized:
-        return {
-            "original": "",
-            "core": "",
-            "legal_form": None,
-            "position": "unknown"
-        }
+        return {"original": "", "core": "", "legal_form": None, "position": "unknown"}
 
-    # 長い法人格から先に確認
-    sorted_forms = sorted(
-        LEGAL_FORMS,
-        key=len,
-        reverse=True
-    )
+    sorted_forms = sorted(LEGAL_FORMS, key=len, reverse=True)
 
     for form in sorted_forms:
-
         if normalized.startswith(form):
-
             core = normalized[len(form):]
-
             if core:
-
-                return {
-                    "original": normalized,
-                    "core": core,
-                    "legal_form": form,
-                    "position": "front"
-                }
-
+                return {"original": normalized, "core": core, "legal_form": form, "position": "front"}
         if normalized.endswith(form):
-
             core = normalized[:-len(form)]
-
             if core:
+                return {"original": normalized, "core": core, "legal_form": form, "position": "back"}
 
-                return {
-                    "original": normalized,
-                    "core": core,
-                    "legal_form": form,
-                    "position": "back"
-                }
-
-    return {
-        "original": normalized,
-        "core": normalized,
-        "legal_form": None,
-        "position": "unknown"
-    }
+    return {"original": normalized, "core": normalized, "legal_form": None, "position": "unknown"}
 
 # ==========================================
 # 候補テキストから法人名候補を判定
 # ==========================================
-def candidate_entity_relation(
-    input_company: str,
-    candidate_text: str
-):
-
-    input_info = parse_legal_entity(
-        input_company
-    )
-
+def candidate_entity_relation(input_company: str, candidate_text: str):
+    input_info = parse_legal_entity(input_company)
     if not input_info["core"]:
         return "unknown"
 
-    text = normalize_company_name(
-        candidate_text
-    )
-
+    text = normalize_company_name(candidate_text)
     input_original = input_info["original"]
     input_core = input_info["core"]
     input_form = input_info["legal_form"]
 
-    # --------------------------------------
     # 前株・後株の逆パターンを厳密排除
-    # --------------------------------------
     if input_core and input_form:
         opposite_company = ""
         if input_info["position"] == "front":
@@ -244,24 +158,13 @@ def candidate_entity_relation(
         if opposite_company and (opposite_company in text) and (input_original not in text):
             return "mismatch"
 
-    # --------------------------------------
-    # 入力会社名そのものが書かれている
-    # --------------------------------------
     if input_original and input_original in text:
         return "match"
 
     if not input_core:
         return "unknown"
 
-    # --------------------------------------
-    # 候補テキスト中に同じコア＋法人格が存在するか調べる
-    # --------------------------------------
-    for form in sorted(
-        LEGAL_FORMS,
-        key=len,
-        reverse=True
-    ):
-
+    for form in sorted(LEGAL_FORMS, key=len, reverse=True):
         front_pattern = re.escape(form) + re.escape(input_core)
         back_pattern = re.escape(input_core) + re.escape(form)
 
@@ -288,17 +191,9 @@ def candidate_entity_relation(
 # ==========================================
 # Tavily検索
 # ==========================================
-def fetch_tavily_results(
-    query: str,
-    api_key: str
-):
-
+def fetch_tavily_results(query: str, api_key: str):
     try:
-
-        client = TavilyClient(
-            api_key=api_key
-        )
-
+        client = TavilyClient(api_key=api_key)
         exclude_list = [
             "wikipedia.org", "yahoo.co.jp", "news.yahoo.co.jp", "nikkei.com",
             "toyokeizai.net", "mynavi.jp", "rikunabi.com", "en-japan.com",
@@ -324,7 +219,6 @@ def fetch_tavily_results(
             })
 
         return results
-
     except Exception as e:
         st.error(f"Tavily検索エラー: {str(e)}")
         st.exception(e)
@@ -333,41 +227,26 @@ def fetch_tavily_results(
 # ==========================================
 # 公式候補スコア
 # ==========================================
-def score_official_candidate(
-    company: str,
-    result: dict
-):
-
+def score_official_candidate(company: str, result: dict):
     title = result.get("title", "")
     snippet = result.get("snippet", "")
     url = result.get("url", "")
-
     title_lower = title.lower()
     snippet_lower = snippet.lower()
     url_lower = url.lower()
 
     score = 0
-
-    # --------------------------------------
-    # 入力会社名そのもの
-    # --------------------------------------
     if normalize_company_name(company).lower() in title_lower:
         score += 25
     if normalize_company_name(company).lower() in snippet_lower:
         score += 15
 
-    # --------------------------------------
-    # 法人格を含む会社名候補
-    # --------------------------------------
     relation = candidate_entity_relation(company, title + "\n" + snippet)
     if relation == "match":
         score += 30
     elif relation == "mismatch":
         score -= 100
 
-    # --------------------------------------
-    # 会社概要らしいタイトル（特大ボーナス）
-    # --------------------------------------
     official_words = [
         "会社概要", "会社情報", "企業情報", "企業概要",
         "company profile", "corporate profile", "about us", "about", "profile", "outline", "corporate", "company"
@@ -376,9 +255,6 @@ def score_official_candidate(
         if word.lower() in title_lower:
             score += 50
 
-    # --------------------------------------
-    # 会社概要らしいURL（特大ボーナス）
-    # --------------------------------------
     official_paths = [
         "/company", "/corporate", "/about", "/about-us", "/about_us", "/profile", "/outline", "company.html", "about.html", "profile.html"
     ]
@@ -386,16 +262,10 @@ def score_official_candidate(
         if path in url_lower:
             score += 50
 
-    # --------------------------------------
-    # トップページより下層の会社概要ページを優先
-    # --------------------------------------
     parsed_url = urlparse(url)
     if parsed_url.path in ["", "/", "/index.html", "/index.php"]:
         score -= 10
 
-    # --------------------------------------
-    # 明らかな第三者サイト
-    # --------------------------------------
     domain = extract_domain(url)
     if is_excluded_domain(domain):
         score -= 100
@@ -405,23 +275,15 @@ def score_official_candidate(
 # ==========================================
 # 公式候補取得
 # ==========================================
-def find_official_candidates(
-    company: str,
-    results: list
-):
-
+def find_official_candidates(company: str, results: list):
     candidates = []
-
     for result in results:
-
         url = result.get("url", "")
         title = result.get("title", "")
         snippet = result.get("snippet", "")
         domain = extract_domain(url)
 
-        if not domain:
-            continue
-        if is_excluded_domain(domain):
+        if not domain or is_excluded_domain(domain):
             continue
 
         candidate_text = title + "\n" + snippet
@@ -431,7 +293,6 @@ def find_official_candidates(
             continue
 
         score = score_official_candidate(company, result)
-
         candidates.append({
             "score": score,
             "domain": domain,
@@ -442,7 +303,6 @@ def find_official_candidates(
         })
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
-
     unique_candidates = []
     seen_urls = set()
 
@@ -456,33 +316,23 @@ def find_official_candidates(
     return unique_candidates[:10]
 
 # ==========================================
-# 会社検索
+# 会社検索 (Q1:会社概要, Q2:九州拠点)
 # ==========================================
-def search_company(
-    company: str,
-    api_key: str
-):
+def search_company(company: str, api_key: str):
     
-    # --------------------------------------
-    # Q1：会社概要
-    # ※前株・後株を厳格にするため "{company}" を維持
-    # --------------------------------------
+    # Q1: 会社概要
     q1 = f'"{company}" 会社概要'
+    q1_results = fetch_tavily_results(q1, api_key)
 
-    q1_results = fetch_tavily_results(
-        q1,
-        api_key
-    )
+    # Q2: 九州拠点
+    q2 = f'"{company}" (九州 OR 福岡 OR 佐賀 OR 長崎 OR 熊本 OR 大分 OR 宮崎 OR 鹿児島) (支店 OR 営業所 OR 拠点 OR 事業所 OR 工場)'
+    q2_results = fetch_tavily_results(q2, api_key)
 
-    official_candidates = (
-        find_official_candidates(
-            company,
-            q1_results
-        )
-    )
+    official_candidates = find_official_candidates(company, q1_results)
 
     return {
         "q1_results": q1_results,
+        "q2_results": q2_results,
         "official_candidates": official_candidates
     }
 
@@ -502,20 +352,11 @@ def safe_parse_json(text):
 # ==========================================
 # Gemini分析
 # ==========================================
-def analyze_companies_batch(
-    batch_data,
-    gemini_key
-):
-
-    client = genai.Client(
-        api_key=gemini_key
-    )
-
+def analyze_companies_batch(batch_data, gemini_key):
+    client = genai.Client(api_key=gemini_key)
     prompt_targets = ""
 
-    for i, item in enumerate(
-        batch_data
-    ):
+    for i, item in enumerate(batch_data):
 
         q1_text = "\n".join(
             [
@@ -529,6 +370,17 @@ def analyze_companies_batch(
             ]
         )
 
+        q2_text = "\n".join(
+            [
+                (
+                    f"- タイトル: {r.get('title', '')}\n"
+                    f"  URL: {r.get('url', '')}\n"
+                    f"  内容: {r.get('snippet', '')}"
+                )
+                for r in item.get("q2_results", [])[:15]
+            ]
+        )
+
         candidates_text = json.dumps(
             item.get("official_candidates", []),
             ensure_ascii=False,
@@ -537,12 +389,10 @@ def analyze_companies_batch(
 
         prompt_targets += (
             f"\n=== 対象企業 {i + 1} ===\n"
-            f"【入力会社名】\n"
-            f"{item['company']}\n\n"
-            f"【公式サイト候補】\n"
-            f"{candidates_text}\n\n"
-            f"【Q1検索結果】\n"
-            f"{q1_text if q1_text else 'なし'}\n"
+            f"【入力会社名】\n{item['company']}\n\n"
+            f"【公式サイト候補】\n{candidates_text}\n\n"
+            f"【Q1検索結果（会社概要用）】\n{q1_text if q1_text else 'なし'}\n\n"
+            f"【Q2検索結果（九州拠点用）】\n{q2_text if q2_text else 'なし'}\n"
         )
 
     prompt = f"""
@@ -561,202 +411,69 @@ def analyze_companies_batch(
 法人格は必ず考慮してください。
 
 例えば、
-
 株式会社ニデック
 ニデック株式会社
-
 は別法人です。
 
 また、
-
 株式会社〇〇
 合同会社〇〇
-有限会社〇〇
 〇〇株式会社
-〇〇合同会社
-〇〇有限会社
-
 なども別法人です。
 
-
-【法人格の例】
-- 株式会社
-- 有限会社
-- 合同会社
-- 合資会社
-- 合名会社
-- 一般社団法人
-- 一般財団法人
-- 公益社団法人
-- 公益財団法人
-- 学校法人
-- 医療法人
-- 社会福祉法人
-- 宗教法人
-- 特定非営利活動法人
-- NPO法人
-- 独立行政法人
-- 国立大学法人
-- 地方独立行政法人
-- 相互会社
-- その他の法人格
-
-
-法人格の種類が違う場合、
-同じコア名称でも「✕ 不一致」です。
-
-
-法人格が同じでも、
-
-株式会社ニデック
-と
-ニデック株式会社
-
-のように位置が異なる場合は
-「✕ 不一致」です。
+法人格の種類や位置（前株・後株）が違う場合、同じコア名称でも「✕ 不一致」です。
 
 
 ==================================================
 【official_url】
 ==================================================
 
-official_urlには、
-入力会社名の対象法人自身の
-「会社概要ページ」を記載してください。
+official_urlには、入力会社名の対象法人自身の「会社概要ページ」を記載してください。
 
 【厳格な優先順位】
 1. 会社概要・企業情報ページ（URLに /company, /about などが含まれるもの）を最優先。
 2. トップページ（/ 終わり）は、他に会社概要ページが見当たらない場合のみ選ぶ。
 3. 採用ページ（/recruit）、製品ページ（/product, /service）、ニュース、IRページは絶対に選ばないでください。
 
-重要：
-official_urlは、
-検索結果に実際に存在するURLだけを使用してください。
-URLを推測して作成してはいけません。
-
-
-対象法人自身の公式サイトを選んでください。
-
-以下は対象法人の公式サイトではありません。
-- Wikipedia
-- 業界団体
-- 日本製薬工業協会
-- Baseconnect
-- Compalyze
-- 求人サイト
-- 転職サイト
-- ニュースサイト
-- 企業情報まとめサイト
-- その他第三者サイト
-
-
-例えば、
-
-入力：
-アステラス製薬株式会社
-
-検索結果：
-https://www.astellas.com/...
-→ 候補
-
-https://www.jpma.or.jp/...
-→ 第三者サイトなので除外
+重要：対象法人自身の公式サイトを選んでください。Wikipediaや求人サイト、企業DBなどは除外してください。
 
 
 ==================================================
-【会社概要URLを選択するときの最重要手順】
+【九州拠点】（厳密な抽出）
 ==================================================
 
-候補ごとに以下を確認してください。
+Q2検索結果（九州拠点用）から、入力会社名と「完全に同一の法人」が直接保有している、九州地方（福岡、佐賀、長崎、熊本、大分、宮崎、鹿児島）の拠点（支店、営業所、事業所、工場など）の名前を抽出してください。
 
-① URLのドメインが対象法人自身の公式サイトか
-② そのURLが会社概要・会社情報・企業情報等のページか
-③ 検索結果中の法人名が入力会社名と一致しているか
-
-3つを満たす候補を優先してください。
-
-例えば、
-
-入力：
-株式会社ニデック
-
-候補：
-https://www.nidec.com/jp/corporate/about/outline
-
-ページ上の法人名：
-ニデック株式会社
-
-これは別法人なので採用禁止。
-
-
-一方、
-
-入力：
-株式会社ニトリ
-
-候補：
-https://www.nitori.co.jp/about_us/corporate_data.html
-
-ページ上の法人名：
-株式会社ニトリ
-
-なら採用してください。
-
-
-==================================================
-【候補のシステム判定について】
-==================================================
-
-「システム判定」が mismatch の候補は採用禁止です。
-「システム判定」が match の候補を最優先してください。
-「unknown」は、
-検索結果だけでは正式法人名が確認できない場合です。
-unknownだけの場合、無理に一致とせず、
-検索結果を確認した上で慎重に判断してください。
+【厳格なルール】
+- 子会社、関連会社、グループ会社の拠点は「絶対に」除外してください。
+  （例：入力が「株式会社ニトリ」の場合、「株式会社ニトリファシリティーズ」の拠点はNG）
+- 代理店、販売店などの情報も除外してください。
+- 該当する拠点がない場合、または別法人の拠点しか見つからない場合は空配列 [] を設定してください。
+- 見つかった場合は、記載されている拠点名（例：「福岡支店」「熊本工場」「法人事業 福岡」など）を文字列の配列として出力してください。
 
 
 ==================================================
 【company_match】
 ==================================================
 
-以下の3つだけを使用してください。
-
-"〇 一致"
-"✕ 不一致"
-"⚠️確認できず"
-
-
-正式法人名を確認でき、入力会社名と完全に一致
-→ 〇 一致
-法人格・法人格の位置・法人名が違う
-→ ✕ 不一致
-正式法人名が確認できない
-→ ⚠️確認できず
+"〇 一致" （正式法人名を確認でき、入力会社名と完全に一致）
+"✕ 不一致" （法人格・法人格の位置・法人名が違う）
+"⚠️確認できず" （正式法人名が確認できない）
 
 
 ==================================================
 【部署別IT提案】
 ==================================================
 
-対象企業の事業内容を踏まえ、
-IT営業で提案できる部署を最大4つ。
-1部署につき3～4個。
-単なる事業内容ではなく、
-その部署に何をIT提案するかを書いてください。
+対象企業の事業内容を踏まえ、IT営業で提案できる部署を最大4つ。1部署につき3～4個。
+単なる事業内容ではなく、その部署に何をIT提案するかを書いてください。
 
 
 ==================================================
 【特記事項】
 ==================================================
 
-2023年8月14日以降の重要事項のみ。
-- 社名変更
-- M&A
-- 組織再編
-- 新規事業
-- 拠点新設・移転
-- 大規模設備投資
-なければ[]。
+2023年8月14日以降の重要事項のみ（社名変更、M&A、組織再編、新規事業など）。なければ[]。
 
 
 {prompt_targets}
@@ -771,28 +488,19 @@ IT営業で提案できる部署を最大4つ。
     "company": "入力会社名",
     "official_url": "https://...",
     "company_match": "〇 一致",
+    "kyushu_branches": ["福岡支店", "熊本営業所"],
     "department_keywords": [
       {{
         "department": "営業部",
-        "keywords": [
-          "SFA導入",
-          "顧客管理DX",
-          "商談進捗管理"
-        ]
+        "keywords": ["SFA導入", "顧客管理DX", "商談進捗管理"]
       }}
     ],
     "notes": []
   }}
 ]
-
-company_matchは必ず次のいずれか：
-「〇 一致」
-「✕ 不一致」
-「⚠️確認できず」
 """
 
     try:
-
         response = client.models.generate_content(
             model="gemini-3.5-flash-lite",
             contents=prompt,
@@ -800,11 +508,7 @@ company_matchは必ず次のいずれか：
                 response_mime_type="application/json"
             )
         )
-
-        return safe_parse_json(
-            response.text.strip()
-        )
-
+        return safe_parse_json(response.text.strip())
     except Exception as e:
         st.error(f"AI分析バッチ処理エラー: {str(e)}")
         st.exception(e)
@@ -813,50 +517,27 @@ company_matchは必ず次のいずれか：
 # ==========================================
 # UI
 # ==========================================
-with st.form(
-    key="batch_search_form"
-):
-
+with st.form(key="batch_search_form"):
     raw_input = st.text_area(
         "会社名リストを入力（スプレッドシートからそのまま貼り付け可能）",
-        placeholder=(
-            "株式会社ニデック\n"
-            "アステラス製薬株式会社\n"
-            "株式会社ニトリ"
-        ),
+        placeholder="株式会社ニデック\nアステラス製薬株式会社\n株式会社ニトリ",
         height=180
     )
-
-    submit_button = st.form_submit_button(
-        "一括検索・分析を実行",
-        type="primary"
-    )
+    submit_button = st.form_submit_button("一括検索・分析を実行", type="primary")
 
 # ==========================================
 # 実行
 # ==========================================
 if submit_button:
-
     if not raw_input.strip():
         st.warning("会社名を入力してください。")
-
-    elif (
-        not tavily_api_key
-        or not gemini_key
-    ):
-        st.error(
-            "Streamlitの Secrets に "
-            "TAVILY_API_KEY または GEMINI_API_KEY "
-            "が設定されていません。"
-        )
-
+    elif not tavily_api_key or not gemini_key:
+        st.error("Streamlitの Secrets に TAVILY_API_KEY または GEMINI_API_KEY が設定されていません。")
     else:
-
         st.session_state.result_cache = {}
         st.session_state.pop("batch_results", None)
 
         lines = raw_input.strip().split("\n")
-
         company_list = []
         for line in lines:
             parts = line.split("\t")
@@ -870,41 +551,29 @@ if submit_button:
         # ==================================
         # Tavily
         # ==================================
-        status.text("会社概要を検索中...")
-
+        status.text("会社概要および九州拠点を検索中...")
         fetched_data = []
 
         for i, company in enumerate(company_list):
-
-            search_data = search_company(
-                company,
-                tavily_api_key
-            )
-
+            search_data = search_company(company, tavily_api_key)
             fetched_data.append({
                 "company": company,
                 "q1_results": search_data["q1_results"],
+                "q2_results": search_data["q2_results"],
                 "official_candidates": search_data["official_candidates"]
             })
-
             progress.progress(((i + 1) / max(len(company_list), 1)) * 0.5)
 
         # ==================================
         # Gemini
         # ==================================
         status.text("AIによる会社概要・社名照合中...")
-
         company_map = {}
         chunk_size = 5
 
         for start in range(0, len(fetched_data), chunk_size):
-
             chunk = fetched_data[start:start + chunk_size]
-
-            response_list = analyze_companies_batch(
-                chunk,
-                gemini_key
-            )
+            response_list = analyze_companies_batch(chunk, gemini_key)
 
             if isinstance(response_list, list):
                 for result in response_list:
@@ -920,37 +589,29 @@ if submit_button:
         batch_results = []
 
         for company in company_list:
-
-            fetched_item = next(
-                (item for item in fetched_data if item["company"] == company),
-                None
-            )
-
+            fetched_item = next((item for item in fetched_data if item["company"] == company), None)
             if fetched_item is None:
-                fetched_item = {
-                    "q1_results": [],
-                    "official_candidates": []
-                }
+                fetched_item = {"q1_results": [], "q2_results": [], "official_candidates": []}
 
             result = company_map.get(company, {})
 
-            # --------------------------------
             # 会社概要URL
-            # --------------------------------
             official_url = result.get("official_url")
             if official_url in ["", "null"]:
                 official_url = None
 
-            # --------------------------------
             # 社名判定
-            # --------------------------------
             company_match = result.get("company_match", "⚠️確認できず")
             if company_match not in ["〇 一致", "✕ 不一致", "⚠️確認できず"]:
                 company_match = "⚠️確認できず"
 
-            # --------------------------------
+            # 九州拠点
+            kyushu_branches = result.get("kyushu_branches", [])
+            if not isinstance(kyushu_branches, list):
+                kyushu_branches = []
+            kyushu_text = "、".join(str(x) for x in kyushu_branches if str(x).strip()) if kyushu_branches else "なし"
+
             # 部署別IT提案
-            # --------------------------------
             department_keywords = result.get("department_keywords", [])
             if not isinstance(department_keywords, list):
                 department_keywords = []
@@ -971,34 +632,29 @@ if submit_button:
                 if not keywords:
                     continue
 
-                department_summary.append(
-                    f"【{department}】 " + " / ".join(keywords)
-                )
+                department_summary.append(f"【{department}】 " + " / ".join(keywords))
 
             department_text = "\n".join(department_summary)
 
-            # --------------------------------
             # 特記事項
-            # --------------------------------
             notes = result.get("notes", [])
             if not isinstance(notes, list):
                 notes = []
             notes_text = ", ".join(str(x) for x in notes)
 
-            # --------------------------------
             # 保存
-            # --------------------------------
             batch_results.append({
                 "会社名": company,
-                "社名判定": company_match,
                 "会社概要URL": official_url,
-                "九州拠点": "一旦調査対象外",
+                "社名判定": company_match,
+                "九州拠点": kyushu_text,
                 "部署別IT提案": department_text,
                 "特記事項": notes_text,
                 "_raw_keywords": department_keywords,
                 "_raw_notes": notes_text,
-                "_q1_results": fetched_item["q1_results"],
-                "_official_candidates": fetched_item["official_candidates"]
+                "_q1_results": fetched_item.get("q1_results", []),
+                "_q2_results": fetched_item.get("q2_results", []),
+                "_official_candidates": fetched_item.get("official_candidates", [])
             })
 
         progress.progress(1.0)
@@ -1016,7 +672,8 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
     st.subheader("検索・分析結果一覧")
 
     df_display = pd.DataFrame(results)
-    expected_columns = ["会社名", "社名判定", "会社概要URL", "九州拠点", "部署別IT提案", "特記事項"]
+    # 表示列の順序を指定（URLが社名判定の左になるように変更）
+    expected_columns = ["会社名", "会社概要URL", "社名判定", "九州拠点", "部署別IT提案", "特記事項"]
 
     for col in expected_columns:
         if col not in df_display.columns:
@@ -1064,6 +721,14 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
         with st.expander(f"{row['会社名']} ── 【{row['社名判定']}】"):
             
             # --------------------------------
+            # 会社概要URL
+            # --------------------------------
+            if row.get("会社概要URL"):
+                st.markdown(f"**会社概要URL:** [{row['会社概要URL']}]({row['会社概要URL']})")
+            else:
+                st.write("**会社概要URL:** 確認できず")
+
+            # --------------------------------
             # 社名判定
             # --------------------------------
             if row["社名判定"] == "〇 一致":
@@ -1074,17 +739,12 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
                 st.warning("社名判定: ⚠️確認できず")
 
             # --------------------------------
-            # 会社概要URL
+            # 九州拠点
             # --------------------------------
-            if row.get("会社概要URL"):
-                st.markdown(f"**会社概要URL:** [{row['会社概要URL']}]({row['会社概要URL']})")
+            if row.get("九州拠点") and row["九州拠点"] != "なし":
+                st.info(f"**九州拠点:** {row['九州拠点']}")
             else:
-                st.write("**会社概要URL:** 確認できず")
-
-            # --------------------------------
-            # 九州
-            # --------------------------------
-            st.info("九州拠点の調査は一旦保留しています。")
+                st.write("**九州拠点:** なし")
 
             # --------------------------------
             # 部署別IT提案
@@ -1111,15 +771,30 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
                 st.info(f"**特記事項:** {row['_raw_notes']}")
 
             # ==================================
-            # デバッグ：Q1
+            # デバッグ：Q1 (会社概要)
             # ==================================
-            with st.expander("🔎 デバッグ：会社概要・公式サイト検索結果"):
+            with st.expander("🔎 デバッグ：会社概要・公式サイト検索結果 (Q1)"):
                 q1_results = row.get("_q1_results", [])
                 if not q1_results:
                     st.write("検索結果なし")
                 else:
                     for idx, result in enumerate(q1_results, start=1):
                         st.markdown(f"### Q1-{idx}")
+                        st.write(f"**タイトル:** {result.get('title', '')}")
+                        st.write(f"**URL:** {result.get('url', '')}")
+                        st.write(f"**内容:** {result.get('snippet', '')}")
+                        st.divider()
+
+            # ==================================
+            # デバッグ：Q2 (九州拠点)
+            # ==================================
+            with st.expander("🔎 デバッグ：九州拠点検索結果 (Q2)"):
+                q2_results = row.get("_q2_results", [])
+                if not q2_results:
+                    st.write("検索結果なし")
+                else:
+                    for idx, result in enumerate(q2_results, start=1):
+                        st.markdown(f"### Q2-{idx}")
                         st.write(f"**タイトル:** {result.get('title', '')}")
                         st.write(f"**URL:** {result.get('url', '')}")
                         st.write(f"**内容:** {result.get('snippet', '')}")
