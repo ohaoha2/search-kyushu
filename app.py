@@ -296,7 +296,6 @@ def score_official_candidate(company: str, result: dict, rank: int):
   if parsed_url.path in ["", "/", "/index.html", "/index.php"]:
     score -= 10
 
-  # 地方代理店ドメイン（y-panasonic.co.jp 等）の減点（本家 panasonic.com 等を優先）
   if domain and re.match(r"^[a-z0-9]+-[a-z0-9]+\.", domain):
     score -= 40
 
@@ -481,13 +480,14 @@ def analyze_companies_batch(batch_data, gemini_key):
 - 小売店舗そのもの（販売店）は除外してください。ただし店舗内に「法人事業部」等がある場合は抽出可。
 
 ==================================================
-【company_match】（社名判定と社名変更ハイパーリンクの厳格ルール）
+【company_match】（社名判定の厳格ルール）
 ==================================================
-1. 検索結果テキスト全体から対象企業の【現在の最新の正式法人名】を特定する。
-2. 【入力会社名】と【現在の最新の正式法人名】を比較する。
+STEP 1: 検索結果テキスト全体から対象企業の【現在の最新の正式法人名】を特定する。
+STEP 2: 【入力会社名】と【現在の最新の正式法人名】を比較する。
 
-・【入力会社名】が【現在の最新の正式法人名】と一致している場合：
-  → **絶対に「〇」** とだけ出力してください。（過去にどれほど社名変更があっても、入力名が現在の最新正式名なら100%「〇」です）
+・【入力会社名】が【現在の最新の正式法人名】と「法人格（株式会社など）も含めて完全に一致」している場合のみ：
+  → **絶対に「〇」** とだけ出力してください。
+  ※入力が「〇〇」で正式名称が「株式会社〇〇」のように、法人格が抜けている場合や位置が異なる場合は完全一致とはみなしません。「〇」にしてはいけません。
 
 ・【入力会社名】が『過去の旧社名』『グループ再編・統合・合併前の社名』である場合（例：ヤフー株式会社 → LINEヤフー株式会社、株式会社ガリバーインターナショナル → 株式会社IDOM、株式会社日立ハイテクノロジーズ → 株式会社日立ハイテク 等）：
   → テキスト全体を1つのMarkdownリンクにし、以下のフォーマットで出力してください。
@@ -672,8 +672,9 @@ if submit_button:
             company_match.replace("**", "").replace("`", "").strip()
         )
 
-        # ★【強化版Python自動補正】入力社名が「現在の新社名」なら、AIが社名変更文脈を出していても物理的に100%「〇」へ補正する
         norm_input = normalize_company_name(company)
+
+        # ★【厳格版Python自動補正】入力社名が「現在の新社名」と法人格を含め完全一致する場合のみ「〇」へ補正する
         if not (company_match == "〇" or company_match.startswith("〇")):
           if "へ変更" in company_match or "に変更" in company_match:
             new_name_matches = re.findall(
@@ -684,26 +685,35 @@ if submit_button:
             else:
               extracted_new_name = normalize_company_name(company_match)
 
-            info_input = parse_legal_entity(company)
-            info_extracted = parse_legal_entity(extracted_new_name)
-
-            input_core = (
-                info_input["core"] if info_input["core"] else norm_input
-            )
-            extracted_core = (
-                info_extracted["core"]
-                if info_extracted["core"]
-                else extracted_new_name
-            )
-
-            if (
-                norm_input == extracted_new_name
-                or (input_core and input_core == extracted_core)
-                or candidate_entity_relation(company, extracted_new_name)
-                == "match"
-                or (input_core and input_core in extracted_new_name)
-            ):
+            # 法人格を含めて完全一致（norm_input == extracted_new_name）する場合のみ「〇」にする
+            if norm_input == extracted_new_name:
               company_match = "〇"
+
+        # ★【ガリバーインターナショナル等の自動救済】「⚠️確認できず」時にQ1結果から社名変更を自動検出して補完
+        if "確認できず" in company_match:
+          for r in fetched_item.get("q1_results", []):
+            snip = r.get("snippet", "") + " " + r.get("title", "")
+            if "社名変更" in snip or "へ変更" in snip or "に変更" in snip:
+              m = re.search(
+                  r"([『「]?[A-Za-z0-9一-龠々-〇\s]+?(?:株式会社|法人)?[』」]?)\s*?へ(?:社名)?変更",
+                  snip,
+              )
+              if m:
+                new_c = (
+                    m.group(1).replace("『", "").replace("』", "").strip()
+                )
+                if new_c and new_c != company:
+                  url = r.get("url", "")
+                  date_m = re.search(
+                      r"(\d{4}年\d{1,2}月(?:\d{1,2}日)?)", snip
+                  )
+                  date_str = f"{date_m.group(1)}に " if date_m else ""
+                  company_match = f"[✕ {date_str}『{new_c}』へ変更]({url})"
+                  if not official_url or "gulliver-i.co.jp" in str(
+                      official_url
+                  ):
+                    official_url = url
+                  break
 
         kyushu_branches = result.get("kyushu_branches", [])
         if not isinstance(kyushu_branches, list):
@@ -860,7 +870,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
       match_str = str(row["社名判定"])
       if match_str == "〇" or match_str.startswith("〇"):
         st.success(f"社名判定: {match_str}")
-      elif match_str.startswith("✕") or "✕" in match_str:
+      elif match_str.startswith("✕") or "✕" in match_str or "[" in match_str:
         st.error(f"社名判定: {match_str}")
       else:
         st.warning(f"社名判定: {match_str}")
