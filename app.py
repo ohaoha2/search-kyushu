@@ -17,7 +17,7 @@ st.set_page_config(
 st.title("企業情報一括検索ツール")
 
 # ==========================================
-# APIキー (Tavily/Bingを廃止し、最強のSerperへ変更)
+# APIキー
 # ==========================================
 serper_api_key = (
     os.getenv("SERPER_API_KEY")
@@ -56,7 +56,6 @@ def is_excluded_domain(domain: str):
     if not domain:
         return True
 
-    # 純粋な機械収集の企業データベースのみに絞る
     excluded_domains = [
         "wikipedia.org", "irbank.net", "compalyze.co.jp", "houjin.jp", 
         "xn--pckua2a7gp15o89zb.com", "baseconnect.in"
@@ -165,12 +164,12 @@ def candidate_entity_relation(input_company: str, candidate_text: str):
     return "unknown"
 
 # ==========================================
-# Serper API 検索 (Googleの検索エンジンを直接叩く最強の代替手段)
+# Serper API 検索 (エラーを確実に画面に表示する安全設計)
 # ==========================================
 def fetch_serper_results(query: str, api_key: str, include_domains: list = None):
     url = "https://google.serper.dev/search"
     
-    # 検索クエリの構築 (Googleのsite:コマンドを使用)
+    # 検索クエリの構築
     if include_domains:
         sites = " OR ".join([f"site:{d}" for d in include_domains])
         final_query = f"{query} {sites}"
@@ -182,34 +181,34 @@ def fetch_serper_results(query: str, api_key: str, include_domains: list = None)
         excludes = " ".join([f"-site:{d}" for d in exclude_list])
         final_query = f"{query} {excludes}"
 
-    payload = json.dumps({
+    payload = {
         "q": final_query,
         "gl": "jp",
         "hl": "ja",
         "num": 20
-    })
+    }
     
     headers = {
-        'X-API-KEY': api_key,
+        'X-API-KEY': api_key.strip(),
         'Content-Type': 'application/json'
     }
     
-    try:
-        response = requests.post(url, headers=headers, data=payload)
-        response.raise_for_status()
-        data = response.json()
+    # スレッド内でエラーを握りつぶさず、必ずメインスレッドに例外を投げる
+    response = requests.post(url, headers=headers, json=payload, timeout=20)
+    
+    if response.status_code != 200:
+        raise Exception(f"Serper API エラー (HTTP {response.status_code}): {response.text}")
         
-        results = []
-        for item in data.get("organic", []):
-            results.append({
-                "title": item.get("title", ""),
-                "url": item.get("link", ""),
-                "snippet": item.get("snippet", "")
-            })
-        return results
-    except Exception as e:
-        st.error(f"Serper検索エラー: {str(e)}")
-        return []
+    data = response.json()
+    
+    results = []
+    for item in data.get("organic", []):
+        results.append({
+            "title": item.get("title", ""),
+            "url": item.get("link", ""),
+            "snippet": item.get("snippet", "")
+        })
+    return results
 
 # ==========================================
 # 公式候補スコア
@@ -303,7 +302,7 @@ def find_official_candidates(company: str, results: list):
     return unique_candidates[:10]
 
 # ==========================================
-# 会社検索 (Q1:会社概要, Q2:九州拠点 - Google完全ドメイン指定)
+# 会社検索
 # ==========================================
 def search_company(company: str, api_key: str):
     
@@ -311,7 +310,6 @@ def search_company(company: str, api_key: str):
     q1 = f'"{company}" 会社概要'
     q1_results = fetch_serper_results(q1, api_key)
 
-    # 公式サイト候補を抽出
     official_candidates = find_official_candidates(company, q1_results)
     
     best_domain = None
@@ -321,17 +319,13 @@ def search_company(company: str, api_key: str):
     # ② Q2: 九州拠点の検索
     q2_results = []
     if best_domain:
-        # 法人格を外した「コア名」を取得
         info = parse_legal_entity(company)
         core_name = info["core"] if info["core"] else company
 
-        # Googleのエンジンを使うため、OR検索が完全に意図通りに機能します
         q2_keywords = f'"{core_name}" (九州 OR 福岡 OR 佐賀 OR 長崎 OR 熊本 OR 大分 OR 宮崎 OR 鹿児島) (拠点 OR 支社 OR 支店 OR 営業所 OR 事業所 OR 事業部 OR 工場 OR Hub)'
         
-        # API側で強固なドメインロックをかける (site:ドメイン名)
         raw_q2_results = fetch_serper_results(q2_keywords, api_key, include_domains=[best_domain])
 
-        # Python側で最終確認の関所
         for r in raw_q2_results:
             domain = extract_domain(r["url"])
             if domain and (domain == best_domain or domain.endswith("." + best_domain)):
@@ -494,8 +488,7 @@ Q1検索結果およびQ2検索結果から、入力会社名と完全に同一�
         )
         return safe_parse_json(response.text.strip())
     except Exception as e:
-        st.error(f"AI分析バッチ処理エラー: {str(e)}")
-        st.exception(e)
+        st.error(f"AI分析エラー: {str(e)}")
         return []
 
 # ==========================================
@@ -504,7 +497,7 @@ Q1検索結果およびQ2検索結果から、入力会社名と完全に同一�
 with st.form(key="batch_search_form"):
     raw_input = st.text_area(
         "会社名リストを入力（スプレッドシートからそのまま貼り付け可能）",
-        value="株式会社○○○○",
+        placeholder="株式会社○○○○\n株式会社△△△", # ← valueからplaceholderに変更しました
         height=180
     )
     submit_button = st.form_submit_button("一括検索・分析を実行", type="primary")
@@ -513,7 +506,8 @@ with st.form(key="batch_search_form"):
 # 実行
 # ==========================================
 if submit_button:
-    if not raw_input.strip() or raw_input.strip() == "株式会社○○○○":
+    # プレースホルダーなので、純粋に空文字かどうかだけをチェック
+    if not raw_input.strip():
         st.warning("会社名を入力してください。")
     elif not serper_api_key or not gemini_key:
         st.error("Streamlitの Secrets に SERPER_API_KEY または GEMINI_API_KEY が設定されていません。")
@@ -538,7 +532,7 @@ if submit_button:
 
         if companies_to_fetch:
             # ==================================
-            # Serper API (マルチスレッド並列処理)
+            # Serper API (エラーを確実に画面表示)
             # ==================================
             status.text("会社概要および九州拠点を検索中... (Googleエンジンで高速抽出中)")
             fetched_data = []
@@ -551,10 +545,17 @@ if submit_button:
                 futures = {executor.submit(fetch_wrapper, comp): comp for comp in companies_to_fetch}
                 completed = 0
                 for future in concurrent.futures.as_completed(futures):
+                    comp_name = futures[future]
                     try:
                         fetched_data.append(future.result())
                     except Exception as e:
-                        st.error(f"{futures[future]}の検索中にエラー: {e}")
+                        st.error(f"【検索失敗】 {comp_name}のデータ取得中にエラーが発生しました: {str(e)}")
+                        fetched_data.append({
+                            "company": comp_name,
+                            "q1_results": [],
+                            "q2_results": [],
+                            "official_candidates": []
+                        })
                     completed += 1
                     progress.progress((completed / len(companies_to_fetch)) * 0.4)
 
@@ -581,7 +582,7 @@ if submit_button:
                                 if comp:
                                     company_map[comp] = r
                     except Exception as e:
-                        st.error(f"Gemini処理中にエラー: {e}")
+                        st.error(f"【AI分析エラー】: {str(e)}")
                     completed_chunks += 1
                     progress.progress(0.4 + (completed_chunks / len(chunks)) * 0.5)
 
