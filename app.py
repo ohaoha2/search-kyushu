@@ -343,13 +343,12 @@ def analyze_companies_batch(batch_data, gemini_key):
 
     for i, item in enumerate(batch_data):
 
-        # ★API消費削減：AIに渡すスニペットを先頭150文字にカット（トークン大幅削減）
         q1_text = "\n".join(
             [
                 (
                     f"- タイトル: {r.get('title', '')}\n"
                     f"  URL: {r.get('url', '')}\n"
-                    f"  内容: {r.get('snippet', '')[:150]}...\n"
+                    f"  内容: {r.get('snippet', '')}\n"
                     f"  システム判定: {r.get('entity_relation', 'unknown')}"
                 )
                 for r in item.get("q1_results", [])[:20]
@@ -361,7 +360,7 @@ def analyze_companies_batch(batch_data, gemini_key):
                 (
                     f"- タイトル: {r.get('title', '')}\n"
                     f"  URL: {r.get('url', '')}\n"
-                    f"  内容: {r.get('snippet', '')[:150]}..."
+                    f"  内容: {r.get('snippet', '')}"
                 )
                 for r in item.get("q2_results", [])[:15]
             ]
@@ -431,13 +430,13 @@ Q1検索結果およびQ2検索結果から、入力会社名と完全に同一�
 ==================================================
 【部署別IT提案】
 ==================================================
-対象企業の事業内容を踏まえ、IT営業で提案できる部署を最大4つ。1部署につき3～4個。
+対象企業の事業内容を踏まえ、IT営業で提案できるITツールを、1部署につき3個。
 
 
 ==================================================
 【特記事項】
 ==================================================
-2023年8月14日以降の重要事項のみ。なければ[]。
+直近３年間の社名変更のみ。なければ[]。
 
 
 {prompt_targets}
@@ -497,7 +496,7 @@ if submit_button:
     elif not tavily_api_key or not gemini_key:
         st.error("Streamlitの Secrets に TAVILY_API_KEY または GEMINI_API_KEY が設定されていません。")
     else:
-        # ★API消費削減：キャッシュをリセットせず残すように変更（st.session_state.result_cache = {}を削除）
+        # キャッシュをリセットせず残す（API節約）
         st.session_state.pop("batch_results", None)
 
         lines = raw_input.strip().split("\n")
