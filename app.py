@@ -164,7 +164,7 @@ def candidate_entity_relation(input_company: str, candidate_text: str):
     return "unknown"
 
 # ==========================================
-# Serper API 検索 (エラー回避のため純粋なテキストのみ送信)
+# Serper API 検索
 # ==========================================
 def fetch_serper_results(query: str, api_key: str):
     url = "https://google.serper.dev/search"
@@ -201,7 +201,6 @@ def fetch_serper_results(query: str, api_key: str):
 # ページ直読み (スクレイピング)
 # ==========================================
 def scrape_page_text(url: str):
-    """URLに直接アクセスし、HTMLタグを除去した本文テキストを抽出する"""
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)'
@@ -324,7 +323,7 @@ def find_official_candidates(company: str, results: list):
 # ==========================================
 def search_company(company: str, api_key: str):
     
-    # ① Q1: 会社概要の検索 (記号を排除した純粋な文字列)
+    # ① Q1: 会社概要の検索
     q1 = f'{company} 会社概要 公式'
     q1_results = fetch_serper_results(q1, api_key)
 
@@ -342,19 +341,15 @@ def search_company(company: str, api_key: str):
         info = parse_legal_entity(company)
         core_name = info["core"] if info["core"] else company
 
-        # ★無料枠制限の完全回避: ドメイン名やORを一切含めない純粋なキーワード
-        # Googleのセマンティック検索により、公式の拠点ページが高確率でヒットします
-        q2_keywords = f'{core_name} 九州 福岡 拠点 支社 支店 営業所'
+        q2_keywords = f'{core_name} 九州 福岡 拠点 支社 支店 営業所 事業所'
         
         raw_q2_results = fetch_serper_results(q2_keywords, api_key)
 
-        # API側で弾けない分、Pythonの関所で確実に公式ドメインだけを残す
         for r in raw_q2_results:
             domain = extract_domain(r["url"])
             if domain and (domain == best_domain or domain.endswith("." + best_domain)):
                 q2_results.append(r)
                 
-        # Google結果の上位1件のURLに直接アクセスし、文字を丸ごと引っこ抜く
         for r in q2_results:
             url = r["url"]
             if not url.lower().endswith(".pdf"):
@@ -430,6 +425,7 @@ def analyze_companies_batch(batch_data, gemini_key):
             f"【Q2ページ本文 直読みデータ（詳細情報）】\n{item.get('scraped_text', '取得失敗 または 該当ページなし')}\n"
         )
 
+    # ★プロンプト微調整：店舗内に併設されている事業部の抽出を明記
     prompt = f"""
 あなたは企業情報調査とDX営業提案の専門家です。
 
@@ -463,9 +459,9 @@ Q1検索結果、Q2検索結果、および「Q2ページ本文 直読みデー�
 - 住所（都道府県名、市区町村、番地）、ビル名、階数（〇F）、電話番号などは「絶対に」出力しないでください。純粋な「拠点名のみ」を抽出してください。
 - 検索エンジンの抜粋の都合で「拠点名がなく、住所しか記載されていない」場合は、絶対に推測せず、空配列 [] を設定してください。
   （ダメな例：「福岡県北九州市小倉北区... Z121ビル3Ｆ」「佐賀県佐賀市駅南本町1番33号」）
-  （良い例：「九州支社」「福岡営業所」「Fukuoka Hub」「法人事業部 福岡」）
+  （良い例：「九州支社」「福岡営業所」「Fukuoka Hub」「法人事業 福岡」）
 - 子会社、関連会社の拠点は絶対に除外してください。
-- 小売店舗、代理店、販売店も除外してください。
+- 小売店舗そのもの（一般消費者向けの販売店）は除外してください。ただし、「法人事業部」や「営業所」などの拠点機能が店舗内に併設されている場合は、その拠点名（例：「法人事業 福岡」など）を抽出してください。
 - 該当拠点がない場合、または別法人のものしかない場合は空配列 [] を設定してください。
 
 
@@ -500,7 +496,7 @@ Q1検索結果、Q2検索結果、および「Q2ページ本文 直読みデー�
     "company": "入力会社名",
     "official_url": "https://...",
     "company_match": "〇 一致",
-    "kyushu_branches": ["九州支社", "熊本営業所", "Fukuoka Hub"],
+    "kyushu_branches": ["九州支社", "熊本営業所", "法人事業 福岡"],
     "department_keywords": [
       {{
         "department": "営業部",
