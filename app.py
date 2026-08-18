@@ -1,88 +1,843 @@
-企業情報一括検索ツール
-会社名リストを入力（スプレッドシートからそのまま貼り付け可能）
+import streamlit as st
+import json
+import os
+import re
+import requests
+import pandas as pd
+import concurrent.futures
+from urllib.parse import urlparse
+from google import genai
+from google.genai import types
 
-富士通Japan株式会社
-株式会社ゼンリン
-株式会社大林組
+st.set_page_config(
+    page_title="企業情報一括検索ツール",
+    layout="wide"
+)
 
-すべての処理が完了しました。
-検索・分析結果一覧
-スプレッドシート用の一括コピー（タブ区切りテキスト）
+st.title("企業情報一括検索ツール")
+
+# ==========================================
+# APIキー
+# ==========================================
+serper_api_key = (
+    os.getenv("SERPER_API_KEY")
+    or st.secrets.get("SERPER_API_KEY", "")
+)
+
+gemini_key = (
+    os.getenv("GEMINI_API_KEY")
+    or st.secrets.get("GEMINI_API_KEY", "")
+)
+
+# ==========================================
+# セッションステート (キャッシュ)
+# ==========================================
+if "search_history" not in st.session_state:
+    st.session_state.search_history = []
+
+if "result_cache" not in st.session_state:
+    st.session_state.result_cache = {}
+
+# ==========================================
+# 法人格一覧
+# ==========================================
+LEGAL_FORMS = [
+    "株式会社", "有限会社", "合同会社", "合資会社", "合名会社",
+    "一般社団法人", "一般財団法人", "公益社団法人", "公益財団法人",
+    "学校法人", "医療法人", "社会福祉法人", "宗教法人", "特定非営利活動法人",
+    "NPO法人", "独立行政法人", "国立大学法人", "地方独立行政法人",
+    "相互会社", "信用金庫", "信用組合",
+]
+
+# ==========================================
+# 第三者サイト絶対除外リスト
+# ==========================================
+def is_excluded_domain(domain: str):
+    if not domain:
+        return True
+
+    # ここにあるドメインは問答無用で候補から消し去る
+    excluded_domains = [
+        "wikipedia.org", "irbank.net", "compalyze.co.jp", "houjin.jp", 
+        "xn--pckua2a7gp15o89zb.com", "baseconnect.in"
+    ]
+
+    return any(
+        domain == excluded or domain.endswith("." + excluded)
+        for excluded in excluded_domains
+    )
+
+# ==========================================
+# URL → ドメイン
+# ==========================================
+def extract_domain(url: str):
+    try:
+        parsed = urlparse(url)
+        if not parsed.netloc:
+            return None
+        domain = parsed.netloc.lower()
+        if domain.startswith("www."):
+            domain = domain[4:]
+        return domain
+    except Exception:
+        return None
+
+# ==========================================
+# 会社名正規化
+# ==========================================
+def normalize_company_name(name: str):
+    if not name:
+        return ""
+    name = str(name)
+    name = re.sub(r"[\s ]+", "", name)
+    return name.strip()
+
+# ==========================================
+# 法人格情報を抽出
+# ==========================================
+def parse_legal_entity(name: str):
+    normalized = normalize_company_name(name)
+    if not normalized:
+        return {"original": "", "core": "", "legal_form": None, "position": "unknown"}
+
+    sorted_forms = sorted(LEGAL_FORMS, key=len, reverse=True)
+
+    for form in sorted_forms:
+        if normalized.startswith(form):
+            core = normalized[len(form):]
+            if core:
+                return {"original": normalized, "core": core, "legal_form": form, "position": "front"}
+        if normalized.endswith(form):
+            core = normalized[:-len(form)]
+            if core:
+                return {"original": normalized, "core": core, "legal_form": form, "position": "back"}
+
+    return {"original": normalized, "core": normalized, "legal_form": None, "position": "unknown"}
+
+# ==========================================
+# 候補テキストから法人名候補を判定
+# ==========================================
+def candidate_entity_relation(input_company: str, candidate_text: str):
+    input_info = parse_legal_entity(input_company)
+    if not input_info["core"]:
+        return "unknown"
+
+    text = normalize_company_name(candidate_text)
+    input_original = input_info["original"]
+    input_core = input_info["core"]
+    input_form = input_info["legal_form"]
+
+    if input_core and input_form:
+        opposite_company = ""
+        if input_info["position"] == "front":
+            opposite_company = f"{input_core}{input_form}"
+        elif input_info["position"] == "back":
+            opposite_company = f"{input_form}{input_core}"
+        
+        if opposite_company and (opposite_company in text) and (input_original not in text):
+            return "mismatch"
+
+    if input_original and input_original in text:
+        return "match"
+
+    if not input_core:
+        return "unknown"
+
+    for form in sorted(LEGAL_FORMS, key=len, reverse=True):
+        front_pattern = re.escape(form) + re.escape(input_core)
+        back_pattern = re.escape(input_core) + re.escape(form)
+
+        has_front = re.search(front_pattern, text)
+        has_back = re.search(back_pattern, text)
+
+        if not has_front and not has_back:
+            continue
+
+        if (
+            form == input_form
+            and ((input_info["position"] == "front" and has_front) or
+                 (input_info["position"] == "back" and has_back))
+        ):
+            return "match"
+
+        return "mismatch"
+
+    return "unknown"
+
+# ==========================================
+# Serper API 検索
+# ==========================================
+def fetch_serper_results(query: str, api_key: str):
+    url = "https://google.serper.dev/search"
+    
+    payload = {
+        "q": query,
+        "gl": "jp",
+        "hl": "ja",
+        "num": 20
+    }
+    
+    headers = {
+        'X-API-KEY': api_key.strip(),
+        'Content-Type': 'application/json'
+    }
+    
+    response = requests.post(url, headers=headers, json=payload, timeout=20)
+    
+    if response.status_code != 200:
+        raise Exception(f"Serper API エラー (HTTP {response.status_code}): {response.text}")
+        
+    data = response.json()
+    
+    results = []
+    for item in data.get("organic", []):
+        results.append({
+            "title": item.get("title", ""),
+            "url": item.get("link", ""),
+            "snippet": item.get("snippet", "")
+        })
+    return results
+
+# ==========================================
+# ページ直読み (スクレイピング)
+# ==========================================
+def scrape_page_text(url: str):
+    """URLに直接アクセスし、HTMLタグを除去した本文テキストを抽出する"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)'
+        }
+        response = requests.get(url, headers=headers, timeout=5)
+        response.encoding = response.apparent_encoding
+        
+        if response.status_code == 200:
+            html = response.text
+            html = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r'<[^>]+>', ' ', html)
+            text = re.sub(r'\s+', ' ', text).strip()
+            return text[:5000] # トークン溢れを防ぐため5000文字でカット
+    except Exception:
+        pass
+    return ""
+
+# ==========================================
+# 公式候補スコア (Google順位を絶対視するよう修正)
+# ==========================================
+def score_official_candidate(company: str, result: dict, rank: int):
+    title = result.get("title", "")
+    snippet = result.get("snippet", "")
+    url = result.get("url", "")
+    title_lower = title.lower()
+    snippet_lower = snippet.lower()
+    url_lower = url.lower()
+    domain = extract_domain(url)
+
+    score = 0
+    
+    # ★Googleの順位を絶対的なスコアにする（1位は+200点、2位は+190点...）
+    score += max(0, (20 - rank) * 10)
+
+    if normalize_company_name(company).lower() in title_lower:
+        score += 25
+    if normalize_company_name(company).lower() in snippet_lower:
+        score += 15
+
+    relation = candidate_entity_relation(company, title + "\n" + snippet)
+    if relation == "match":
+        score += 30
+    elif relation == "mismatch":
+        score -= 100
+
+    official_words = [
+        "会社概要", "会社情報", "企業情報", "企業概要",
+        "company profile", "corporate profile", "about us", "about", "profile", "outline", "corporate", "company"
+    ]
+    for word in official_words:
+        if word.lower() in title_lower:
+            score += 50
+
+    official_paths = [
+        "/company", "/corporate", "/about", "/about-us", "/about_us", "/profile", "/outline", "company.html", "about.html", "profile.html"
+    ]
+    for path in official_paths:
+        if path in url_lower:
+            score += 50
+
+    parsed_url = urlparse(url)
+    if parsed_url.path in ["", "/", "/index.html", "/index.php"]:
+        score -= 10
+
+    # DodaやMetoreeなどの企業DBは強烈に減点（ただしGoogle1位なら逆転可能）
+    spam_domains = [
+        "metoree.com", "doda.jp", "mynavi.jp", "rikunabi.com", "en-japan.com",
+        "salesnow.jp", "syukatsu-kaigi.jp", "jobtalk.jp", "openwork.jp", "en-hyouban.com",
+        "prtimes.jp", "mapion.co.jp", "navitime.co.jp", "bizmaps.jp", "nikkei.com",
+        "yahoo.co.jp", "toyokeizai.net", "atengineer.com", "ipros.com"
+    ]
+    for spam in spam_domains:
+        if domain and spam in domain:
+            score -= 100
+
+    return score
+
+# ==========================================
+# 公式候補取得
+# ==========================================
+def find_official_candidates(company: str, results: list):
+    candidates = []
+    # 検索順位(idx)をスコア関数に渡す
+    for idx, result in enumerate(results):
+        url = result.get("url", "")
+        title = result.get("title", "")
+        snippet = result.get("snippet", "")
+        domain = extract_domain(url)
+
+        if not domain or is_excluded_domain(domain):
+            continue
+
+        candidate_text = title + "\n" + snippet
+        relation = candidate_entity_relation(company, candidate_text)
+
+        if relation == "mismatch":
+            continue
+
+        # 順位に基づくスコア付け
+        score = score_official_candidate(company, result, idx)
+        candidates.append({
+            "score": score,
+            "domain": domain,
+            "title": title,
+            "url": url,
+            "snippet": snippet,
+            "entity_relation": relation
+        })
+
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    unique_candidates = []
+    seen_urls = set()
+
+    for candidate in candidates:
+        url = candidate["url"]
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        unique_candidates.append(candidate)
+
+    return unique_candidates[:10]
+
+# ==========================================
+# 会社検索
+# ==========================================
+def search_company(company: str, api_key: str):
+    
+    # ① Q1: 会社概要の検索
+    q1 = f'{company} 会社概要 公式'
+    q1_results = fetch_serper_results(q1, api_key)
+
+    official_candidates = find_official_candidates(company, q1_results)
+    
+    best_domain = None
+    if official_candidates:
+        best_domain = official_candidates[0]["domain"]
+
+    # ② Q2: 九州拠点の検索
+    q2_results = []
+    scraped_text = ""
+    
+    if best_domain:
+        info = parse_legal_entity(company)
+        core_name = info["core"] if info["core"] else company
+
+        # ★無料枠で許可される site: コマンドを使って完全にドメインロック
+        q2_keywords = f'{core_name} 拠点 支社 営業所 事業所 福岡 九州 site:{best_domain}'
+        
+        raw_q2_results = fetch_serper_results(q2_keywords, api_key)
+
+        for r in raw_q2_results:
+            domain = extract_domain(r["url"])
+            if domain and (domain == best_domain or domain.endswith("." + best_domain)):
+                q2_results.append(r)
+                
+        # Google結果の上位1件のURLに直接アクセスし、文字を丸ごと引っこ抜く（スニペット制限の突破）
+        for r in q2_results:
+            url = r["url"]
+            if not url.lower().endswith(".pdf"):
+                scraped = scrape_page_text(url)
+                if scraped:
+                    scraped_text = f"【{r['title']}】のページ直読みデータ:\n{scraped}"
+                    break
+
+    return {
+        "q1_results": q1_results,
+        "q2_results": q2_results,
+        "official_candidates": official_candidates,
+        "scraped_text": scraped_text
+    }
+
+# ==========================================
+# JSONパース
+# ==========================================
+def safe_parse_json(text):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        text = text.replace("```json", "").replace("```", "").strip()
+        match = re.search(r"\[.*\]|\{.*\}", text, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        raise
+
+# ==========================================
+# Gemini分析
+# ==========================================
+def analyze_companies_batch(batch_data, gemini_key):
+    client = genai.Client(api_key=gemini_key)
+    prompt_targets = ""
+
+    for i, item in enumerate(batch_data):
+
+        q1_text = "\n".join(
+            [
+                (
+                    f"- タイトル: {r.get('title', '')}\n"
+                    f"  URL: {r.get('url', '')}\n"
+                    f"  内容: {r.get('snippet', '')}\n"
+                    f"  システム判定: {r.get('entity_relation', 'unknown')}"
+                )
+                for r in item.get("q1_results", [])[:20]
+            ]
+        )
+
+        q2_text = "\n".join(
+            [
+                (
+                    f"- タイトル: {r.get('title', '')}\n"
+                    f"  URL: {r.get('url', '')}\n"
+                    f"  内容: {r.get('snippet', '')}"
+                )
+                for r in item.get("q2_results", [])[:15]
+            ]
+        )
+
+        candidates_text = json.dumps(
+            item.get("official_candidates", []),
+            ensure_ascii=False,
+            indent=2
+        )
+
+        prompt_targets += (
+            f"\n=== 対象企業 {i + 1} ===\n"
+            f"【入力会社名】\n{item['company']}\n\n"
+            f"【公式サイト候補】\n{candidates_text}\n\n"
+            f"【Q1検索結果（会社概要用）】\n{q1_text if q1_text else 'なし'}\n\n"
+            f"【Q2検索結果（公式ドメイン内 九州拠点用）】\n{q2_text if q2_text else '公式サイト内に該当する拠点ページが見つかりませんでした'}\n\n"
+            f"【Q2ページ本文 直読みデータ（詳細情報）】\n{item.get('scraped_text', '取得失敗 または 該当ページなし')}\n"
+        )
+
+    prompt = f"""
+あなたは企業情報調査とDX営業提案の専門家です。
+
+提供された検索結果（およびページ直読みデータ）だけを使って判断してください。
+情報を推測・補完してはいけません。
 
 
-各社詳細・カード表示
-富士通Japan株式会社 ── 【〇 一致】
+==================================================
+【最重要：正式法人名の照合】
+==================================================
+入力会社名と検索結果に現れる法人名を照合してください。
+法人格の種類や位置（前株・後株）が違う場合、同じコア名称でも「✕ 不一致」です。
 
-会社概要URL: https://global.fujitsu/ja-jp/subsidiaries/fjj/about
 
-社名判定: 〇 一致
+==================================================
+【official_url】
+==================================================
+official_urlには、入力会社名の対象法人自身の「会社概要ページ」を記載してください。
+【厳格な優先順位】
+1. 会社概要・企業情報ページ（URLに /company, /about などが含まれるもの）を最優先。
+2. トップページ（/ 終わり）は他にない場合のみ。
+3. 採用、製品、ニュース、IRページは選ばない。
 
-九州拠点: なし
 
-部署別IT提案:
+==================================================
+【九州拠点】（厳密な抽出）
+==================================================
+Q1検索結果、Q2検索結果、および「Q2ページ本文 直読みデータ」の中から、入力会社名と完全に同一の法人が直接保有している九州地方の拠点名（支社、支店、営業所、事業所、工場、事業部、Hubなど）を抽出してください。
 
-【営業部】
+【厳格な禁止ルール】
+- 住所（都道府県名、市区町村、番地）、ビル名、階数（〇F）、電話番号などは「絶対に」出力しないでください。純粋な「拠点名のみ」を抽出してください。
+- 検索エンジンの抜粋の都合で「拠点名がなく、住所しか記載されていない」場合は、絶対に推測せず、空配列 [] を設定してください。
+  （ダメな例：「福岡県北九州市小倉北区... Z121ビル3Ｆ」「佐賀県佐賀市駅南本町1番33号」）
+  （良い例：「九州支社」「福岡営業所」「Fukuoka Hub」「法人事業部 福岡」）
+- 子会社、関連会社の拠点は絶対に除外してください。
+- 小売店舗、代理店、販売店も除外してください。
+- 該当拠点がない場合、または別法人のものしかない場合は空配列 [] を設定してください。
 
-SFA（営業支援システム）
-CRM（顧客管理）
-名刺管理サービス
-【人事部】
 
-タレントマネジメントシステム
-WEB面接システム
-従業員エンゲージメントツール
-【総務部】
+==================================================
+【company_match】
+==================================================
+"〇 一致" （正式法人名を確認でき、入力会社名と完全に一致）
+"✕ 不一致" （法人格・法人格の位置・法人名が違う）
+"⚠️確認できず" （正式法人名が確認できない）
 
-電子契約システム
-クラウド型ワークフロー
-文書管理システム
-【経理部】
 
-AI-OCR搭載請求書受領システム
-経費精算システム
-電子帳簿保存法対応ストレージ
-【情報システム部】
+==================================================
+【部署別IT提案】
+==================================================
+対象企業の事業内容を踏まえ、IT営業で提案できるITツールを、1部署につき3個。
 
-IT資産管理ツール
-EDR(エンドポイント検出・対応)
-クラウドセキュリティゲートウェイ
-🔎 デバッグ：会社概要・公式サイト検索結果 (Q1)
 
-🔎 デバッグ：九州拠点検索結果 (Q2)
+==================================================
+【特記事項】
+==================================================
+直近３年間の社名変更のみ。なければ[]。
 
-Q2-1
-タイトル: 福岡県の「富士通」の代理店24社
 
-URL: https://metoree.com/companies/2189/distributors/fkuoka/
+{prompt_targets}
 
-内容: 九州営業所. : 福岡県福岡市博多区博多駅東3-12-24博多駅東QRビル10F. 株式会社 ... 福岡営業所. : 福岡県福岡市博多区博多駅東二丁目18番23号GRAND HILL IWASE BLD1 ...
 
-Q2-2
-タイトル: 富士通株式会社の会社概要・製品情報
+==================================================
+【JSON】
+==================================================
+[
+  {{
+    "company": "入力会社名",
+    "official_url": "https://...",
+    "company_match": "〇 一致",
+    "kyushu_branches": ["九州支社", "熊本営業所", "Fukuoka Hub"],
+    "department_keywords": [
+      {{
+        "department": "営業部",
+        "keywords": ["SFA導入", "顧客管理DX", "商談進捗管理"]
+      }}
+    ],
+    "notes": []
+  }}
+]
+"""
 
-URL: https://metoree.com/companies/2189/
+    try:
+        response = client.models.generate_content(
+            model="gemini-3.5-flash-lite",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
+        return safe_parse_json(response.text.strip())
+    except Exception as e:
+        st.error(f"AI分析エラー: {str(e)}")
+        return []
 
-内容: 北海道・青森県・秋田県・富山県・東京都・神奈川県・千葉県・愛知県・大阪府・高知県・福岡県で富士通株式会社の事業所が21箇所登録されています。 ... 九州R&Dセンター ...
+# ==========================================
+# UI
+# ==========================================
+with st.form(key="batch_search_form"):
+    raw_input = st.text_area(
+        "会社名リストを入力（スプレッドシートからそのまま貼り付け可能）",
+        placeholder="株式会社○○○○\n株式会社△△△",
+        height=180
+    )
+    submit_button = st.form_submit_button("一括検索・分析を実行", type="primary")
 
-Q2-3
-タイトル: 「富士通」の代理店145社 注目ランキング【2026年】
+# ==========================================
+# 実行
+# ==========================================
+if submit_button:
+    if not raw_input.strip() or raw_input.strip() == "株式会社○○○○":
+        st.warning("会社名を入力してください。")
+    elif not serper_api_key or not gemini_key:
+        st.error("Streamlitの Secrets に SERPER_API_KEY または GEMINI_API_KEY が設定されていません。")
+    else:
+        st.session_state.result_cache = {}
+        st.session_state.pop("batch_results", None)
 
-URL: https://metoree.com/companies/2189/distributors/
+        lines = raw_input.strip().split("\n")
+        company_list = []
+        for line in lines:
+            parts = line.split("\t")
+            company = parts[0].strip()
+            if company and company not in company_list:
+                company_list.append(company)
 
-内容: 代理店の支店や営業所等の各地拠点情報も含めて探すことができます。 北海道 ... 日本 住所: 福岡県福岡市博多区冷泉町7番19号. テクノデザイン工業株式会社-ロゴ ...
+        companies_to_fetch = company_list
+        final_results = []
+        
+        progress = st.progress(0)
+        status = st.empty()
 
-Q2-4
-タイトル: 富士通Japan株式会社の会社概要・製品情報
+        if companies_to_fetch:
+            # ==================================
+            # Serper API + 直読みスクレイピング
+            # ==================================
+            status.text("会社概要および九州拠点を検索・ページ直読み中...")
+            fetched_data = []
 
-URL: https://metoree.com/companies/80891/
+            def fetch_wrapper(comp):
+                data = search_company(comp, serper_api_key)
+                return {"company": comp, **data}
 
-内容: 富士通Japan株式会社は1947年に設立された東京都港区東新橋1-5-2(汐留シティセンター)に本社が所在する会社です。ISMS取得支援サービス等を取り扱っています。
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {executor.submit(fetch_wrapper, comp): comp for comp in companies_to_fetch}
+                completed = 0
+                for future in concurrent.futures.as_completed(futures):
+                    comp_name = futures[future]
+                    try:
+                        fetched_data.append(future.result())
+                    except Exception as e:
+                        st.error(f"【検索失敗】 {comp_name}のデータ取得中にエラーが発生しました: {str(e)}")
+                        fetched_data.append({
+                            "company": comp_name,
+                            "q1_results": [],
+                            "q2_results": [],
+                            "official_candidates": [],
+                            "scraped_text": ""
+                        })
+                    completed += 1
+                    progress.progress((completed / len(companies_to_fetch)) * 0.4)
 
-🔎 デバッグ：ページ直読みデータ (スクレイピング)
+            # ==================================
+            # Gemini (マルチスレッド並列処理)
+            # ==================================
+            status.text("AIによる会社概要・社名照合中...")
+            company_map = {}
+            chunk_size = 5
+            chunks = [fetched_data[i:i + chunk_size] for i in range(0, len(fetched_data), chunk_size)]
 
-🔎 デバッグ：公式候補
+            def gemini_wrapper(chunk):
+                return analyze_companies_batch(chunk, gemini_key)
 
-株式会社ゼンリン ── 【〇 一致】
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                futures = [executor.submit(gemini_wrapper, chunk) for chunk in chunks]
+                completed_chunks = 0
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        res_list = future.result()
+                        if isinstance(res_list, list):
+                            for r in res_list:
+                                comp = r.get("company")
+                                if comp:
+                                    company_map[comp] = r
+                    except Exception as e:
+                        st.error(f"【AI分析エラー】: {str(e)}")
+                    completed_chunks += 1
+                    progress.progress(0.4 + (completed_chunks / len(chunks)) * 0.5)
 
-株式会社大林組 ── 【〇 一致】
+            # ==================================
+            # 最終整形
+            # ==================================
+            status.text("結果を整形中...")
+            for company in companies_to_fetch:
+                fetched_item = next((item for item in fetched_data if item["company"] == company), None)
+                if fetched_item is None:
+                    fetched_item = {"q1_results": [], "q2_results": [], "official_candidates": [], "scraped_text": ""}
 
+                result = company_map.get(company, {})
+
+                official_url = result.get("official_url")
+                if official_url in ["", "null"]:
+                    official_url = None
+
+                company_match = result.get("company_match", "⚠️確認できず")
+                if company_match not in ["〇 一致", "✕ 不一致", "⚠️確認できず"]:
+                    company_match = "⚠️確認できず"
+
+                kyushu_branches = result.get("kyushu_branches", [])
+                if not isinstance(kyushu_branches, list):
+                    kyushu_branches = []
+                kyushu_text = "、".join(str(x) for x in kyushu_branches if str(x).strip()) if kyushu_branches else "なし"
+
+                department_keywords = result.get("department_keywords", [])
+                if not isinstance(department_keywords, list):
+                    department_keywords = []
+
+                department_summary = []
+                for item in department_keywords:
+                    if not isinstance(item, dict):
+                        continue
+                    department = str(item.get("department", "")).strip()
+                    keywords = item.get("keywords", [])
+                    
+                    if not department:
+                        continue
+                    if not isinstance(keywords, list):
+                        keywords = []
+
+                    keywords = [str(x) for x in keywords if str(x).strip()]
+                    if not keywords:
+                        continue
+
+                    department_summary.append(f"【{department}】 " + " / ".join(keywords))
+
+                department_text = "\n".join(department_summary)
+
+                notes = result.get("notes", [])
+                if not isinstance(notes, list):
+                    notes = []
+                notes_text = ", ".join(str(x) for x in notes)
+
+                final_row = {
+                    "会社名": company,
+                    "会社概要URL": official_url,
+                    "社名判定": company_match,
+                    "九州拠点": kyushu_text,
+                    "部署別IT提案": department_text,
+                    "特記事項": notes_text,
+                    "_raw_keywords": department_keywords,
+                    "_raw_notes": notes_text,
+                    "_q1_results": fetched_item.get("q1_results", []),
+                    "_q2_results": fetched_item.get("q2_results", []),
+                    "_official_candidates": fetched_item.get("official_candidates", []),
+                    "_scraped_text": fetched_item.get("scraped_text", "")
+                }
+                
+                st.session_state.result_cache[company] = final_row
+                final_results.append(final_row)
+
+        progress.progress(1.0)
+        status.text("すべての処理が完了しました。")
+
+        ordered_results = []
+        for comp in company_list:
+            row = next((r for r in final_results if r["会社名"] == comp), None)
+            if row:
+                ordered_results.append(row)
+
+        st.session_state["batch_results"] = ordered_results
+
+# ==========================================
+# 結果表示
+# ==========================================
+if "batch_results" in st.session_state and st.session_state["batch_results"]:
+
+    results = st.session_state["batch_results"]
+
+    st.divider()
+    st.subheader("検索・分析結果一覧")
+
+    df_display = pd.DataFrame(results)
+    expected_columns = ["会社名", "会社概要URL", "社名判定", "九州拠点", "部署別IT提案", "特記事項"]
+
+    for col in expected_columns:
+        if col not in df_display.columns:
+            df_display[col] = ""
+
+    df_display = df_display[expected_columns]
+
+    st.dataframe(
+        df_display,
+        column_config={
+            "会社概要URL": st.column_config.LinkColumn(
+                "会社概要URL",
+                help="会社概要ページを開きます"
+            )
+        },
+        use_container_width=True
+    )
+
+    # ======================================
+    # TSV
+    # ======================================
+    tsv_text = df_display.to_csv(sep="\t", index=False)
+    with st.expander("スプレッドシート用の一括コピー（タブ区切りテキスト）"):
+        st.code(tsv_text, language="text")
+
+    # ======================================
+    # CSV
+    # ======================================
+    csv_data = df_display.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        label="結果をCSVでダウンロード",
+        data=csv_data,
+        file_name="corporate_search_results.csv",
+        mime="text/csv",
+        type="primary"
+    )
+
+    # ======================================
+    # カード
+    # ======================================
+    st.divider()
+    st.subheader("各社詳細・カード表示")
+
+    for row in results:
+        with st.expander(f"{row['会社名']} ── 【{row['社名判定']}】"):
+            
+            if row.get("会社概要URL"):
+                st.markdown(f"**会社概要URL:** [{row['会社概要URL']}]({row['会社概要URL']})")
+            else:
+                st.write("**会社概要URL:** 確認できず")
+
+            if row["社名判定"] == "〇 一致":
+                st.success("社名判定: 〇 一致")
+            elif row["社名判定"] == "✕ 不一致":
+                st.error("社名判定: ✕ 不一致")
+            else:
+                st.warning("社名判定: ⚠️確認できず")
+
+            if row.get("九州拠点") and row["九州拠点"] != "なし":
+                st.info(f"**九州拠点:** {row['九州拠点']}")
+            else:
+                st.write("**九州拠点:** なし")
+
+            if row.get("_raw_keywords"):
+                st.markdown("**部署別IT提案:**")
+                for item in row["_raw_keywords"]:
+                    if not isinstance(item, dict):
+                        continue
+                    department = item.get("department", "")
+                    keywords = item.get("keywords", [])
+                    
+                    if not department:
+                        continue
+                    
+                    st.markdown(f"**【{department}】**")
+                    for keyword in keywords:
+                        st.markdown(f"- {keyword}")
+
+            if row.get("_raw_notes"):
+                st.info(f"**特記事項:** {row['_raw_notes']}")
+
+            with st.expander("🔎 デバッグ：会社概要・公式サイト検索結果 (Q1)"):
+                q1_results = row.get("_q1_results", [])
+                if not q1_results:
+                    st.write("検索結果なし")
+                else:
+                    for idx, result in enumerate(q1_results, start=1):
+                        st.markdown(f"### Q1-{idx}")
+                        st.write(f"**タイトル:** {result.get('title', '')}")
+                        st.write(f"**URL:** {result.get('url', '')}")
+                        st.write(f"**内容:** {result.get('snippet', '')}")
+                        st.divider()
+
+            with st.expander("🔎 デバッグ：九州拠点検索結果 (Q2)"):
+                q2_results = row.get("_q2_results", [])
+                if not q2_results:
+                    st.write("公式サイト内に該当する拠点ページが見つかりませんでした")
+                else:
+                    for idx, result in enumerate(q2_results, start=1):
+                        st.markdown(f"### Q2-{idx}")
+                        st.write(f"**タイトル:** {result.get('title', '')}")
+                        st.write(f"**URL:** {result.get('url', '')}")
+                        st.write(f"**内容:** {result.get('snippet', '')}")
+                        st.divider()
+                        
+            with st.expander("🔎 デバッグ：ページ直読みデータ (スクレイピング)"):
+                scraped_text = row.get("_scraped_text", "")
+                if not scraped_text:
+                    st.write("直読みデータの取得はありませんでした。")
+                else:
+                    st.write(scraped_text)
+
+            with st.expander("🔎 デバッグ：公式候補"):
+                candidates = row.get("_official_candidates", [])
+                if not candidates:
+                    st.write("公式サイト候補なし")
+                else:
+                    for candidate in candidates:
+                        st.write(f"スコア: {candidate.get('score')}")
+                        st.write(f"ドメイン: {candidate.get('domain')}")
+                        st.write(f"タイトル: {candidate.get('title')}")
+                        st.write(f"URL: {candidate.get('url')}")
+                        st.write(f"法人関係判定: {candidate.get('entity_relation')}")
+                        st.divider()
