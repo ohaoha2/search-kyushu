@@ -355,7 +355,8 @@ def search_company(company: str, api_key: str):
             if not url.lower().endswith(".pdf"):
                 scraped = scrape_page_text(url)
                 if scraped:
-                    scraped_text = f"【{r['title']}】のページ直読みデータ:\n{scraped}"
+                    # ★AIがURLを紐付けやすいよう、明示的にURLを記載する
+                    scraped_text = f"【{r['title']}】(URL: {url}) のページ直読みデータ:\n{scraped}"
                     break
 
     return {
@@ -425,18 +426,19 @@ def analyze_companies_batch(batch_data, gemini_key):
             f"【Q2ページ本文 直読みデータ（詳細情報）】\n{item.get('scraped_text', '取得失敗 または 該当ページなし')}\n"
         )
 
+    # ★プロンプト修正：九州拠点の出力形式を URL付きのオブジェクト に変更
     prompt = f"""
 あなたは企業情報調査とDX営業提案の専門家です。
 
 提供された検索結果（およびページ直読みデータ）だけを使って判断してください。
-情報を推測・補完してはいけません。
+【重要】検索結果テキスト内に明記されていない事実・日付を推測や計算で算出して補完することは厳禁です。
 
 
 ==================================================
 【最重要：正式法人名の照合】
 ==================================================
 入力会社名と検索結果に現れる法人名を照合してください。
-法人格の種類や位置（前株・後株）が違う場合、同じコア名称でも「✕ 不一致」です。
+※入力会社名が「旧社名」であり、直近で社名変更された事実が確認できる場合は、「〇 一致」として扱ってください。
 
 
 ==================================================
@@ -450,15 +452,14 @@ official_urlには、入力会社名の対象法人自身の「会社概要ペ�
 
 
 ==================================================
-【九州拠点】（厳密な抽出）
+【九州拠点】（厳密な抽出とURLの紐付け）
 ==================================================
 Q1検索結果、Q2検索結果、および「Q2ページ本文 直読みデータ」の中から、入力会社名と完全に同一の法人が直接保有している九州地方の拠点名（支社、支店、営業所、事業所、工場、事業部、Hubなど）を抽出してください。
+また、抽出した拠点ごとに、その情報が記載されていたページの「URL」もセットで出力してください。（検索結果のURLや直読みデータのURLを参照してください。どうしても不明な場合はURLを "" としてください。）
 
 【厳格な禁止ルール】
 - 住所（都道府県名、市区町村、番地）、ビル名、階数（〇F）、電話番号などは「絶対に」出力しないでください。純粋な「拠点名のみ」を抽出してください。
 - 検索エンジンの抜粋の都合で「拠点名がなく、住所しか記載されていない」場合は、絶対に推測せず、空配列 [] を設定してください。
-  （ダメな例：「福岡県北九州市小倉北区... Z121ビル3Ｆ」「佐賀県佐賀市駅南本町1番33号」）
-  （良い例：「九州支社」「福岡営業所」「Fukuoka Hub」「法人事業部 福岡」）
 - 子会社、関連会社の拠点は絶対に除外してください。
 - 小売店舗そのもの（一般消費者向けの販売店）は除外してください。ただし、「法人事業部」や「営業所」などの拠点機能が店舗内に併設されている場合は、その拠点名（例：「法人事業 福岡」など）を抽出してください。
 - 該当拠点がない場合、または別法人のものしかない場合は空配列 [] を設定してください。
@@ -467,8 +468,8 @@ Q1検索結果、Q2検索結果、および「Q2ページ本文 直読みデー�
 ==================================================
 【company_match】
 ==================================================
-"〇 一致" （正式法人名を確認でき、入力会社名と完全に一致）
-"✕ 不一致" （法人格・法人格の位置・法人名が違う）
+"〇 一致" （正式法人名を確認でき、入力会社名と一致、または社名変更前の旧社名である場合）
+"✕ 不一致" （法人格・法人格の位置・全く異なる法人である場合）
 "⚠️確認できず" （正式法人名が確認できない）
 
 
@@ -482,9 +483,10 @@ Q1検索結果、Q2検索結果、および「Q2ページ本文 直読みデー�
 【特記事項】（厳格なファクトチェック）
 ==================================================
 直近3年間の社名変更について記載してください。
-検索結果に「社名変更年月日」が明記されている場合：「〇年〇月〇日『変更後の会社名』へ社名変更」と記載してください。
-検索結果から日付が特定できないが、社名変更の事実がある場合：日付は絶対に推測せず、「『変更後の会社名』へ社名変更」とだけ記載してください。
-社名変更がなければ [] を設定してください。
+- 検索結果に「社名変更年月日」が明記されている場合：「〇年〇月〇日に『変更後の会社名』へ社名変更」と記載してください。
+- 検索結果から日付が特定できないが、社名変更の事実がある場合：日付は絶対に推測せず、「『変更後の会社名』へ社名変更」とだけ記載してください。（例：「クララ株式会社へ社名変更」）
+それ以外のニュースは不要です。社名変更がなければ [] を設定してください。
+
 
 {prompt_targets}
 
@@ -497,14 +499,23 @@ Q1検索結果、Q2検索結果、および「Q2ページ本文 直読みデー�
     "company": "入力会社名",
     "official_url": "https://...",
     "company_match": "〇 一致",
-    "kyushu_branches": ["九州支社", "熊本営業所", "法人事業 福岡"],
+    "kyushu_branches": [
+      {{
+        "name": "九州支社",
+        "url": "https://..."
+      }},
+      {{
+        "name": "法人事業 福岡",
+        "url": "https://..."
+      }}
+    ],
     "department_keywords": [
       {{
         "department": "営業部",
         "keywords": ["SFA導入", "顧客管理DX", "商談進捗管理"]
       }}
     ],
-    "notes": ["2023年4月1日に「日本電産株式会社」から「ニデック株式会社」へ社名変更"]
+    "notes": ["クララ株式会社へ社名変更"] 
   }}
 ]
 """
@@ -635,10 +646,25 @@ if submit_button:
                 if company_match not in ["〇 一致", "✕ 不一致", "⚠️確認できず"]:
                     company_match = "⚠️確認できず"
 
+                # ★ 新しい拠点スキーマ（辞書のリスト）をMarkdown形式のリンクに変換
                 kyushu_branches = result.get("kyushu_branches", [])
                 if not isinstance(kyushu_branches, list):
                     kyushu_branches = []
-                kyushu_text = "\n".join(str(x) for x in kyushu_branches if str(x).strip()) if kyushu_branches else "なし"
+                
+                branch_md_list = []
+                for b in kyushu_branches:
+                    if isinstance(b, dict):
+                        b_name = b.get("name", "").strip()
+                        b_url = b.get("url", "").strip()
+                        if b_name:
+                            if b_url and b_url.lower() != "null":
+                                branch_md_list.append(f"[{b_name}]({b_url})")
+                            else:
+                                branch_md_list.append(b_name)
+                    elif isinstance(b, str) and b.strip(): # フォールバック（AIが以前の形式で返した場合）
+                        branch_md_list.append(b.strip())
+
+                kyushu_text = "\n".join(branch_md_list) if branch_md_list else "なし"
 
                 department_keywords = result.get("department_keywords", [])
                 if not isinstance(department_keywords, list):
@@ -708,7 +734,6 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
     st.divider()
     st.subheader("検索・分析結果一覧")
 
-    # データフレーム（CSV出力用）
     df_display = pd.DataFrame(results)
     expected_columns = ["会社名", "会社概要URL", "社名判定", "九州拠点", "部署別IT提案", "特記事項"]
 
@@ -718,7 +743,6 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
 
     df_display = df_display[expected_columns]
 
-    # ★【見やすさ改善】リストをMarkdownテーブルにして、複数行・折り返しを綺麗に表示
     md_table = "| 会社名 | 会社概要URL | 社名判定 | 九州拠点 | 部署別IT提案 | 特記事項 |\n"
     md_table += "|---|---|---|---|---|---|\n"
     
@@ -728,7 +752,6 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
         url_md = f"[リンク]({url})" if url else "確認できず"
         match_md = row.get("社名判定", "")
         
-        # セル内の改行を<br>タグに変換して複数行表示に対応させる
         kyushu_md = str(row.get("九州拠点", "")).replace("\n", "<br>")
         it_prop_md = str(row.get("部署別IT提案", "")).replace("\n", "<br>")
         notes_md = str(row.get("特記事項", "")).replace("\n", "<br>")
@@ -777,7 +800,8 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
                 st.warning("社名判定: ⚠️確認できず")
 
             if row.get("九州拠点") and row["九州拠点"] != "なし":
-                st.info(f"**九州拠点:** \n{row['九州拠点']}")
+                # Markdownレンダリングを有効にするため st.markdown を使用
+                st.markdown(f"**九州拠点:** \n{row['九州拠点']}")
             else:
                 st.write("**九州拠点:** なし")
 
