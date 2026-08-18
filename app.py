@@ -16,14 +16,31 @@ st.set_page_config(
 
 st.title("企業情報一括検索ツール")
 
-serper_api_key = os.getenv("SERPER_API_KEY") or st.secrets.get("SERPER_API_KEY", "")
-gemini_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
+# ==========================================
+# APIキー
+# ==========================================
+serper_api_key = (
+    os.getenv("SERPER_API_KEY")
+    or st.secrets.get("SERPER_API_KEY", "")
+)
 
+gemini_key = (
+    os.getenv("GEMINI_API_KEY")
+    or st.secrets.get("GEMINI_API_KEY", "")
+)
+
+# ==========================================
+# セッションステート (キャッシュ)
+# ==========================================
 if "search_history" not in st.session_state:
     st.session_state.search_history = []
+
 if "result_cache" not in st.session_state:
     st.session_state.result_cache = {}
 
+# ==========================================
+# 法人格一覧
+# ==========================================
 LEGAL_FORMS = [
     "株式会社", "有限会社", "合同会社", "合資会社", "合名会社",
     "一般社団法人", "一般財団法人", "公益社団法人", "公益財団法人",
@@ -32,15 +49,26 @@ LEGAL_FORMS = [
     "相互会社", "信用金庫", "信用組合",
 ]
 
+# ==========================================
+# 第三者サイト除外
+# ==========================================
 def is_excluded_domain(domain: str):
     if not domain:
         return True
+
     excluded_domains = [
         "wikipedia.org", "irbank.net", "compalyze.co.jp", "houjin.jp", 
         "xn--pckua2a7gp15o89zb.com", "baseconnect.in"
     ]
-    return any(domain == excluded or domain.endswith("." + excluded) for excluded in excluded_domains)
 
+    return any(
+        domain == excluded or domain.endswith("." + excluded)
+        for excluded in excluded_domains
+    )
+
+# ==========================================
+# URL → ドメイン
+# ==========================================
 def extract_domain(url: str):
     try:
         parsed = urlparse(url)
@@ -53,6 +81,9 @@ def extract_domain(url: str):
     except Exception:
         return None
 
+# ==========================================
+# 会社名正規化
+# ==========================================
 def normalize_company_name(name: str):
     if not name:
         return ""
@@ -60,11 +91,16 @@ def normalize_company_name(name: str):
     name = re.sub(r"[\s ]+", "", name)
     return name.strip()
 
+# ==========================================
+# 法人格情報を抽出
+# ==========================================
 def parse_legal_entity(name: str):
     normalized = normalize_company_name(name)
     if not normalized:
         return {"original": "", "core": "", "legal_form": None, "position": "unknown"}
+
     sorted_forms = sorted(LEGAL_FORMS, key=len, reverse=True)
+
     for form in sorted_forms:
         if normalized.startswith(form):
             core = normalized[len(form):]
@@ -74,12 +110,17 @@ def parse_legal_entity(name: str):
             core = normalized[:-len(form)]
             if core:
                 return {"original": normalized, "core": core, "legal_form": form, "position": "back"}
+
     return {"original": normalized, "core": normalized, "legal_form": None, "position": "unknown"}
 
+# ==========================================
+# 候補テキストから法人名候補を判定
+# ==========================================
 def candidate_entity_relation(input_company: str, candidate_text: str):
     input_info = parse_legal_entity(input_company)
     if not input_info["core"]:
         return "unknown"
+
     text = normalize_company_name(candidate_text)
     input_original = input_info["original"]
     input_core = input_info["core"]
@@ -91,34 +132,62 @@ def candidate_entity_relation(input_company: str, candidate_text: str):
             opposite_company = f"{input_core}{input_form}"
         elif input_info["position"] == "back":
             opposite_company = f"{input_form}{input_core}"
+        
         if opposite_company and (opposite_company in text) and (input_original not in text):
             return "mismatch"
 
     if input_original and input_original in text:
         return "match"
+
     if not input_core:
         return "unknown"
 
     for form in sorted(LEGAL_FORMS, key=len, reverse=True):
         front_pattern = re.escape(form) + re.escape(input_core)
         back_pattern = re.escape(input_core) + re.escape(form)
+
         has_front = re.search(front_pattern, text)
         has_back = re.search(back_pattern, text)
+
         if not has_front and not has_back:
             continue
-        if form == input_form and ((input_info["position"] == "front" and has_front) or (input_info["position"] == "back" and has_back)):
+
+        if (
+            form == input_form
+            and ((input_info["position"] == "front" and has_front) or
+                 (input_info["position"] == "back" and has_back))
+        ):
             return "match"
+
         return "mismatch"
+
     return "unknown"
 
+# ==========================================
+# Serper API 検索
+# ==========================================
 def fetch_serper_results(query: str, api_key: str):
     url = "https://google.serper.dev/search"
-    payload = {"q": query, "gl": "jp", "hl": "ja", "num": 40}
-    headers = {'X-API-KEY': api_key.strip(), 'Content-Type': 'application/json'}
+    
+    payload = {
+        "q": query,
+        "gl": "jp",
+        "hl": "ja",
+        "num": 40
+    }
+    
+    headers = {
+        'X-API-KEY': api_key.strip(),
+        'Content-Type': 'application/json'
+    }
+    
     response = requests.post(url, headers=headers, json=payload, timeout=20)
+    
     if response.status_code != 200:
         raise Exception(f"Serper API エラー (HTTP {response.status_code}): {response.text}")
+        
     data = response.json()
+    
     results = []
     for item in data.get("organic", []):
         results.append({
@@ -128,11 +197,17 @@ def fetch_serper_results(query: str, api_key: str):
         })
     return results
 
+# ==========================================
+# ページ直読み (スクレイピング)
+# ==========================================
 def scrape_page_text(url: str):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)'
+        }
         response = requests.get(url, headers=headers, timeout=5)
         response.encoding = response.apparent_encoding
+        
         if response.status_code == 200:
             html = response.text
             html = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
@@ -143,16 +218,24 @@ def scrape_page_text(url: str):
         pass
     return ""
 
+# ==========================================
+# 公式候補スコア
+# ==========================================
 def score_official_candidate(company: str, result: dict, rank: int):
     title = result.get("title", "")
     snippet = result.get("snippet", "")
     url = result.get("url", "")
+    title_lower = title.lower()
+    snippet_lower = snippet.lower()
+    url_lower = url.lower()
     domain = extract_domain(url)
-    score = max(0, (20 - rank) * 10)
 
-    if normalize_company_name(company).lower() in title.lower():
+    score = 0
+    score += max(0, (20 - rank) * 10)
+
+    if normalize_company_name(company).lower() in title_lower:
         score += 25
-    if normalize_company_name(company).lower() in snippet.lower():
+    if normalize_company_name(company).lower() in snippet_lower:
         score += 15
 
     relation = candidate_entity_relation(company, title + "\n" + snippet)
@@ -161,14 +244,19 @@ def score_official_candidate(company: str, result: dict, rank: int):
     elif relation == "mismatch":
         score -= 100
 
-    official_words = ["会社概要", "会社情報", "企業情報", "企業概要", "company profile", "corporate profile", "about us", "about", "profile", "outline", "corporate", "company"]
+    official_words = [
+        "会社概要", "会社情報", "企業情報", "企業概要",
+        "company profile", "corporate profile", "about us", "about", "profile", "outline", "corporate", "company"
+    ]
     for word in official_words:
-        if word.lower() in title.lower():
+        if word.lower() in title_lower:
             score += 50
 
-    official_paths = ["/company", "/corporate", "/about", "/about-us", "/about_us", "/profile", "/outline", "company.html", "about.html", "profile.html"]
+    official_paths = [
+        "/company", "/corporate", "/about", "/about-us", "/about_us", "/profile", "/outline", "company.html", "about.html", "profile.html"
+    ]
     for path in official_paths:
-        if path in url.lower():
+        if path in url_lower:
             score += 50
 
     parsed_url = urlparse(url)
@@ -184,8 +272,12 @@ def score_official_candidate(company: str, result: dict, rank: int):
     for spam in spam_domains:
         if domain and spam in domain:
             score -= 100
+
     return score
 
+# ==========================================
+# 公式候補取得
+# ==========================================
 def find_official_candidates(company: str, results: list):
     candidates = []
     for idx, result in enumerate(results):
@@ -193,11 +285,16 @@ def find_official_candidates(company: str, results: list):
         title = result.get("title", "")
         snippet = result.get("snippet", "")
         domain = extract_domain(url)
+
         if not domain or is_excluded_domain(domain):
             continue
-        relation = candidate_entity_relation(company, title + "\n" + snippet)
+
+        candidate_text = title + "\n" + snippet
+        relation = candidate_entity_relation(company, candidate_text)
+
         if relation == "mismatch":
             continue
+
         score = score_official_candidate(company, result, idx)
         candidates.append({
             "score": score,
@@ -207,19 +304,28 @@ def find_official_candidates(company: str, results: list):
             "snippet": snippet,
             "entity_relation": relation
         })
+
     candidates.sort(key=lambda x: x["score"], reverse=True)
     unique_candidates = []
     seen_urls = set()
+
     for candidate in candidates:
-        if candidate["url"] in seen_urls:
+        url = candidate["url"]
+        if url in seen_urls:
             continue
-        seen_urls.add(candidate["url"])
+        seen_urls.add(url)
         unique_candidates.append(candidate)
+
     return unique_candidates[:10]
 
+# ==========================================
+# 会社検索
+# ==========================================
 def search_company(company: str, api_key: str):
+    
     q1 = f'{company} 会社概要 公式'
     q1_results = fetch_serper_results(q1, api_key)
+
     official_candidates = find_official_candidates(company, q1_results)
     
     best_domain = None
@@ -232,7 +338,9 @@ def search_company(company: str, api_key: str):
     if best_domain:
         info = parse_legal_entity(company)
         core_name = info["core"] if info["core"] else company
+
         q2_keywords = f'{core_name} 九州 福岡 拠点 支社 支店 営業所 事業所'
+        
         raw_q2_results = fetch_serper_results(q2_keywords, api_key)
 
         for r in raw_q2_results:
@@ -255,6 +363,9 @@ def search_company(company: str, api_key: str):
         "scraped_text": scraped_text
     }
 
+# ==========================================
+# JSONパース
+# ==========================================
 def safe_parse_json(text):
     try:
         return json.loads(text)
@@ -265,14 +376,43 @@ def safe_parse_json(text):
             return json.loads(match.group(0))
         raise
 
+# ==========================================
+# Gemini分析
+# ==========================================
 def analyze_companies_batch(batch_data, gemini_key):
     client = genai.Client(api_key=gemini_key)
     prompt_targets = ""
 
     for i, item in enumerate(batch_data):
-        q1_text = "\n".join([f"- タイトル: {r.get('title', '')}\n  URL: {r.get('url', '')}\n  内容: {r.get('snippet', '')}\n  システム判定: {r.get('entity_relation', 'unknown')}" for r in item.get("q1_results", [])[:20]])
-        q2_text = "\n".join([f"- タイトル: {r.get('title', '')}\n  URL: {r.get('url', '')}\n  内容: {r.get('snippet', '')}" for r in item.get("q2_results", [])[:15]])
-        candidates_text = json.dumps(item.get("official_candidates", []), ensure_ascii=False, indent=2)
+
+        q1_text = "\n".join(
+            [
+                (
+                    f"- タイトル: {r.get('title', '')}\n"
+                    f"  URL: {r.get('url', '')}\n"
+                    f"  内容: {r.get('snippet', '')}\n"
+                    f"  システム判定: {r.get('entity_relation', 'unknown')}"
+                )
+                for r in item.get("q1_results", [])[:20]
+            ]
+        )
+
+        q2_text = "\n".join(
+            [
+                (
+                    f"- タイトル: {r.get('title', '')}\n"
+                    f"  URL: {r.get('url', '')}\n"
+                    f"  内容: {r.get('snippet', '')}"
+                )
+                for r in item.get("q2_results", [])[:15]
+            ]
+        )
+
+        candidates_text = json.dumps(
+            item.get("official_candidates", []),
+            ensure_ascii=False,
+            indent=2
+        )
 
         prompt_targets += (
             f"\n=== 対象企業 {i + 1} ===\n"
@@ -283,6 +423,7 @@ def analyze_companies_batch(batch_data, gemini_key):
             f"【Q2ページ本文 直読みデータ（詳細情報）】\n{item.get('scraped_text', '取得失敗 または 該当ページなし')}\n"
         )
 
+    # ★プロンプトの大幅修正：URLの優先順位、子会社の除外、社名判定の厳格化
     prompt = f"""
 あなたは企業情報調査とDX営業提案の専門家です。
 提供された検索結果（およびページ直読みデータ）だけを使って判断してください。
@@ -291,7 +432,10 @@ def analyze_companies_batch(batch_data, gemini_key):
 ==================================================
 【official_url】
 ==================================================
-入力会社名の対象法人自身の「会社概要ページ」を記載してください。
+Q1検索結果の中から、対象法人の「会社概要ページ」または「企業情報ページ」のURLを1つ選んで記載してください。
+【厳格な優先順位】
+1. URLのパスに /company, /about, /corporate, /profile などが含まれる「会社概要・企業情報ページ」を最優先で選ぶこと。
+2. トップページ（/ 終わり）は、会社概要ページがどうしても見つからない場合のみ選ぶこと。
 
 ==================================================
 【九州拠点】（厳密な抽出とURLの紐付け）
@@ -302,19 +446,20 @@ def analyze_companies_batch(batch_data, gemini_key):
 【厳格な禁止ルール】
 - 住所、ビル名、階数、電話番号などは出力しないでください。「拠点名のみ」を抽出してください。
 - 拠点名がなく住所しか記載されていない場合は、推測せず空配列 [] を設定してください。
-- 【最重要】子会社、グループ会社の拠点は「絶対に」除外してください。対象法人とは異なる法人名が含まれる場合は除外。
+- 【最重要：子会社・グループ会社の徹底除外】
+  検索結果に、入力会社名とは異なる法人名（例：「株式会社〇〇」「〇〇株式会社」など、法人名が含まれた別の名前）の拠点がある場合、それは子会社やグループ会社です。絶対に抽出しないでください。
+  （ダメな例：「ニデックオーケーケー株式会社 九州支社」「株式会社TAKISAWA 福岡営業所」 → 入力会社名と違う別法人なので完全に無視・除外する！）
 - 小売店舗そのもの（販売店）は除外してください。ただし店舗内に「法人事業部」等がある場合は抽出可。
 
 ==================================================
 【company_match】（社名判定と社名変更情報）
 ==================================================
 入力会社名と、会社概要に記載されている「現在の正式法人名」を照合してください。
-- 入力会社名と現在の正式法人名が完全に一致している場合：「〇 一致」
-- 入力会社名が「旧社名」であり、社名変更の事実が確認できた場合：「✕ [変更年月] 『新社名』へ変更」
-  （例：「✕ 2023年4月に 『ニデック株式会社』へ変更」、日付が不明な場合は「✕ 『ニデック株式会社』へ変更」）
-  ※必ず「変更前（旧社名）」から「変更後（新社名）」の方向を間違えないこと。
-- 入力会社名が全く異なる別法人の場合：「✕ 不一致」
-- 正式法人名が確認できない場合：「⚠️確認できず」
+- 「〇 一致」：入力会社名と現在の正式法人名が完全に一致している場合。※過去に社名変更があったとしても、現在の名前が入力されていれば「〇 一致」です。（例：「ニデック株式会社」と入力され、現在も「ニデック株式会社」なら「〇 一致」）
+- 「✕ [変更年月] 『新社名』へ変更」：入力会社名が『社名変更前の旧社名』である場合のみ、この形式にしてください。
+  （例：入力会社名が「旧社名株式会社」で、現在「新社名株式会社」に変更されている場合は「✕ 2023年4月に 『新社名株式会社』へ変更」とする）
+- 「✕ 不一致」：入力会社名が全く異なる別法人の場合。
+- 「⚠️確認できず」：正式法人名が確認できない場合。
 
 ==================================================
 【部署別IT】
@@ -329,8 +474,8 @@ def analyze_companies_batch(batch_data, gemini_key):
 [
   {{
     "company": "入力会社名",
-    "official_url": "https://...",
-    "company_match": "✕ 2023年4月に 『ニデック株式会社』へ変更",
+    "official_url": "https://.../company/",
+    "company_match": "✕ 2023年4月に 『新社名株式会社』へ変更",
     "kyushu_branches": [
       {{
         "name": "九州支社",
@@ -455,6 +600,7 @@ if submit_button:
                     fetched_item = {"q1_results": [], "q2_results": [], "official_candidates": [], "scraped_text": ""}
 
                 result = company_map.get(company, {})
+
                 official_url = result.get("official_url")
                 if official_url in ["", "null"]:
                     official_url = None
@@ -499,6 +645,7 @@ if submit_button:
                     keywords = [str(x) for x in keywords if str(x).strip()]
                     if not keywords:
                         continue
+
                     department_summary.append(f"【{department}】\n" + "\n".join(f"・{kw}" for kw in keywords))
 
                 department_text = "\n\n".join(department_summary)
@@ -549,7 +696,6 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
 
     df_display = df_display[expected_columns]
 
-    # 特記事項列を削除し、スッキリした表構成に
     md_table = "| 会社名 | 会社概要URL | 社名判定 | 九州拠点 | 部署別IT |\n"
     md_table += "|---|---|---|---|---|\n"
     
@@ -597,12 +743,10 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
             else:
                 st.write("**会社概要URL:** 確認できず")
 
-            # 社名判定の文字色出し分け
             match_str = row["社名判定"]
             if match_str.startswith("〇"):
                 st.success(f"社名判定: {match_str}")
             elif match_str.startswith("✕"):
-                # 社名変更の情報が含まれる場合もあるためそのまま表示
                 st.error(f"社名判定: {match_str}")
             else:
                 st.warning(f"社名判定: {match_str}")
