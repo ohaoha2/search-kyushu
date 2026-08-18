@@ -50,13 +50,12 @@ LEGAL_FORMS = [
 ]
 
 # ==========================================
-# 第三者サイト絶対除外リスト
+# 第三者サイト除外
 # ==========================================
 def is_excluded_domain(domain: str):
     if not domain:
         return True
 
-    # ここにあるドメインは問答無用で候補から消し去る
     excluded_domains = [
         "wikipedia.org", "irbank.net", "compalyze.co.jp", "houjin.jp", 
         "xn--pckua2a7gp15o89zb.com", "baseconnect.in"
@@ -165,7 +164,7 @@ def candidate_entity_relation(input_company: str, candidate_text: str):
     return "unknown"
 
 # ==========================================
-# Serper API 検索
+# Serper API 検索 (エラー回避のため純粋なテキストのみ送信)
 # ==========================================
 def fetch_serper_results(query: str, api_key: str):
     url = "https://google.serper.dev/search"
@@ -174,7 +173,7 @@ def fetch_serper_results(query: str, api_key: str):
         "q": query,
         "gl": "jp",
         "hl": "ja",
-        "num": 20
+        "num": 40
     }
     
     headers = {
@@ -215,13 +214,13 @@ def scrape_page_text(url: str):
             html = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
             text = re.sub(r'<[^>]+>', ' ', html)
             text = re.sub(r'\s+', ' ', text).strip()
-            return text[:5000] # トークン溢れを防ぐため5000文字でカット
+            return text[:5000]
     except Exception:
         pass
     return ""
 
 # ==========================================
-# 公式候補スコア (Google順位を絶対視するよう修正)
+# 公式候補スコア
 # ==========================================
 def score_official_candidate(company: str, result: dict, rank: int):
     title = result.get("title", "")
@@ -233,8 +232,6 @@ def score_official_candidate(company: str, result: dict, rank: int):
     domain = extract_domain(url)
 
     score = 0
-    
-    # ★Googleの順位を絶対的なスコアにする（1位は+200点、2位は+190点...）
     score += max(0, (20 - rank) * 10)
 
     if normalize_company_name(company).lower() in title_lower:
@@ -267,7 +264,6 @@ def score_official_candidate(company: str, result: dict, rank: int):
     if parsed_url.path in ["", "/", "/index.html", "/index.php"]:
         score -= 10
 
-    # DodaやMetoreeなどの企業DBは強烈に減点（ただしGoogle1位なら逆転可能）
     spam_domains = [
         "metoree.com", "doda.jp", "mynavi.jp", "rikunabi.com", "en-japan.com",
         "salesnow.jp", "syukatsu-kaigi.jp", "jobtalk.jp", "openwork.jp", "en-hyouban.com",
@@ -285,7 +281,6 @@ def score_official_candidate(company: str, result: dict, rank: int):
 # ==========================================
 def find_official_candidates(company: str, results: list):
     candidates = []
-    # 検索順位(idx)をスコア関数に渡す
     for idx, result in enumerate(results):
         url = result.get("url", "")
         title = result.get("title", "")
@@ -301,7 +296,6 @@ def find_official_candidates(company: str, results: list):
         if relation == "mismatch":
             continue
 
-        # 順位に基づくスコア付け
         score = score_official_candidate(company, result, idx)
         candidates.append({
             "score": score,
@@ -330,7 +324,7 @@ def find_official_candidates(company: str, results: list):
 # ==========================================
 def search_company(company: str, api_key: str):
     
-    # ① Q1: 会社概要の検索
+    # ① Q1: 会社概要の検索 (記号を排除した純粋な文字列)
     q1 = f'{company} 会社概要 公式'
     q1_results = fetch_serper_results(q1, api_key)
 
@@ -348,17 +342,19 @@ def search_company(company: str, api_key: str):
         info = parse_legal_entity(company)
         core_name = info["core"] if info["core"] else company
 
-        # ★無料枠で許可される site: コマンドを使って完全にドメインロック
-        q2_keywords = f'{core_name} 拠点 支社 営業所 事業所 福岡 九州 site:{best_domain}'
+        # ★無料枠制限の完全回避: ドメイン名やORを一切含めない純粋なキーワード
+        # Googleのセマンティック検索により、公式の拠点ページが高確率でヒットします
+        q2_keywords = f'{core_name} 九州 福岡 拠点 支社 支店 営業所'
         
         raw_q2_results = fetch_serper_results(q2_keywords, api_key)
 
+        # API側で弾けない分、Pythonの関所で確実に公式ドメインだけを残す
         for r in raw_q2_results:
             domain = extract_domain(r["url"])
             if domain and (domain == best_domain or domain.endswith("." + best_domain)):
                 q2_results.append(r)
                 
-        # Google結果の上位1件のURLに直接アクセスし、文字を丸ごと引っこ抜く（スニペット制限の突破）
+        # Google結果の上位1件のURLに直接アクセスし、文字を丸ごと引っこ抜く
         for r in q2_results:
             url = r["url"]
             if not url.lower().endswith(".pdf"):
