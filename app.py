@@ -138,7 +138,7 @@ def scrape_page_text(url: str):
             html = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
             text = re.sub(r'<[^>]+>', ' ', html)
             text = re.sub(r'\s+', ' ', text).strip()
-            return text[:5000]
+            return text[:4000]
     except Exception:
         pass
     return ""
@@ -218,7 +218,7 @@ def find_official_candidates(company: str, results: list):
     return unique_candidates[:10]
 
 def search_company(company: str, api_key: str):
-    q1 = f'{company} 会社概要 公式'
+    q1 = f'{company} 会社概要 公式 社名変更'
     q1_results = fetch_serper_results(q1, api_key)
     official_candidates = find_official_candidates(company, q1_results)
     
@@ -227,12 +227,12 @@ def search_company(company: str, api_key: str):
         best_domain = official_candidates[0]["domain"]
 
     q2_results = []
-    scraped_text = ""
+    scraped_texts = []
     
     if best_domain:
         info = parse_legal_entity(company)
         core_name = info["core"] if info["core"] else company
-        q2_keywords = f'{core_name} 九州 福岡 拠点 支社 支店 営業所 事業所'
+        q2_keywords = f'{core_name} 九州 福岡 拠点 支社 支店 営業所 事業所 Office拠点'
         raw_q2_results = fetch_serper_results(q2_keywords, api_key)
 
         for r in raw_q2_results:
@@ -240,19 +240,19 @@ def search_company(company: str, api_key: str):
             if domain and (domain == best_domain or domain.endswith("." + best_domain)):
                 q2_results.append(r)
                 
-        for r in q2_results:
+        # パナソニックなどの大企業対策：最大3件まで直読みして網羅性を高める
+        for r in q2_results[:3]:
             url = r["url"]
             if not url.lower().endswith(".pdf"):
                 scraped = scrape_page_text(url)
                 if scraped:
-                    scraped_text = f"【{r['title']}】(URL: {url}) のページ直読みデータ:\n{scraped}"
-                    break
+                    scraped_texts.append(f"【{r['title']}】(URL: {url}) の直読みデータ:\n{scraped}")
 
     return {
         "q1_results": q1_results,
         "q2_results": q2_results,
         "official_candidates": official_candidates,
-        "scraped_text": scraped_text
+        "scraped_text": "\n\n".join(scraped_texts)
     }
 
 def safe_parse_json(text):
@@ -278,9 +278,9 @@ def analyze_companies_batch(batch_data, gemini_key):
             f"\n=== 対象企業 {i + 1} ===\n"
             f"【入力会社名】\n{item['company']}\n\n"
             f"【公式サイト候補】\n{candidates_text}\n\n"
-            f"【Q1検索結果（会社概要用）】\n{q1_text if q1_text else 'なし'}\n\n"
+            f"【Q1検索結果（会社概要・社名変更用）】\n{q1_text if q1_text else 'なし'}\n\n"
             f"【Q2検索結果（公式ドメイン内 九州拠点用）】\n{q2_text if q2_text else '公式サイト内に該当する拠点ページが見つかりませんでした'}\n\n"
-            f"【Q2ページ本文 直読みデータ（詳細情報）】\n{item.get('scraped_text', '取得失敗 または 該当ページなし')}\n"
+            f"【Q2ページ本文 直読みデータ（詳細拠点情報）】\n{item.get('scraped_text', '取得失敗 または 該当ページなし')}\n"
         )
 
     prompt = f"""
@@ -289,43 +289,40 @@ def analyze_companies_batch(batch_data, gemini_key):
 
 【最重要禁止事項】
 - 検索結果内に明記されていない事実・日付・社名を推測や計算で算出して補完することは厳禁です。
-- テキスト内の無関係な数値（例：「57日」等）を結合して架空の日付を作成することは絶対に禁止です。
+- 無関係な数値（例：「57日」等）から架空の日付を作成することは絶対に禁止です。
 
 ==================================================
 【official_url】
 ==================================================
 入力会社名の対象法人自身の「会社概要ページ」を記載してください。
-【優先順位】
-URLのパスに /company, /about, /corporate, /profile などが含まれる「会社概要・企業情報ページ」を最優先で選ぶこと。トップページ（/ 終わり）は他になければ選ぶ。
+URLのパスに /company, /about, /corporate, /profile などが含まれる「会社概要・企業情報ページ」を最優先で選ぶこと。
 
 ==================================================
 【九州拠点】（厳密な抽出とURLの紐付け）
 ==================================================
-検索結果の中から、対象法人が直接保有している九州地方の拠点名（支社、支店、営業所、工場など）を抽出してください。
+検索結果および直読みデータから、対象法人が直接保有している九州地方（福岡、佐賀、長崎、熊本、大分、宮崎、鹿児島、沖縄）の拠点名（支社、支店、営業所、事業所、工場、Hub、ショールーム等）を抽出してください。
 抽出した拠点ごとに、情報が記載されていたページの「URL」もセットで出力してください。
 
 【厳格な禁止ルール】
 - 住所、ビル名、階数、電話番号などは出力しないでください。「拠点名のみ」を抽出してください。
-- 拠点名がなく住所しか記載されていない場合は、推測せず空配列 [] を設定してください。
-- 【最重要：子会社・グループ会社の徹底除外】
-  「入力会社名とは異なる法人名（例：株式会社〇〇、〇〇株式会社など）」が含まれる拠点は、子会社やグループ会社です。絶対に抽出しないでください。
-- 小売店舗そのもの（販売店）は除外してください。ただし店舗内に「法人事業部」等がある場合は抽出可。
+- 子会社や別法人の拠点（入力会社名と異なる会社名の拠点）は完全に除外してください。
 
 ==================================================
 【company_match】（社名判定と社名変更の厳格ルール）
 ==================================================
-1. 検索結果テキストから対象企業の【現在の正式法人名】を確認する。
-2. 【入力会社名】と【現在の正式法人名】を照合する。
+1. 検索結果テキストから対象企業の【現在の最新の正式法人名】を特定する。
+2. 【入力会社名】と【現在の最新の正式法人名】を厳密に比較する。
 
-・【入力会社名】＝【現在の正式法人名】である場合
-  → **絶対に「〇」** とだけ出力してください。（「〇 一致」ではなく単に「〇」のみ）
+・【入力会社名】が【現在の最新の正式法人名】と完全に一致している場合：
+  → **絶対に「〇」** とだけ出力してください。
+  ※過去に社名変更履歴があった企業であっても、入力された名前が現在の最新正式社名であれば判定は100%「〇」です。
 
-・【入力会社名】が『過去の旧社名』であり、検索テキスト内に「旧社名から新社名へ社名変更した」という明確な事実表現がある場合のみ
-  → **「✕ [変更年月日] 『現在の新社名』へ変更 ([根拠](根拠URL))」** と出力してください。
-  ※【厳格なルール】:
-    - 検索結果内に明記されている正確な年月日（例: 2023年4月1日）がある場合のみ日付を記載。
-    - 日付が見つからない場合は「✕ 『現在の新社名』へ変更 ([根拠](根拠URL))」とする（日付の推測・捏造は厳禁）。
-    - 根拠URLには、検索結果内の該当するニュース記事、プレスリリース、または会社概要ページのURLをセットすること。根拠URLがない場合は `([根拠](URL))` を省略。
+・【入力会社名】が『過去の旧社名』であり、現在は別の新社名に変更されている場合（例：「株式会社日立ハイテクノロジーズ」→「株式会社日立ハイテク」、「株式会社クララオンライン」→「クララ株式会社」など）：
+  → テキスト全体をMarkdownリンクにし、以下のフォーマットで出力してください。
+  フォーマット： **`[✕ [変更年月日] 『現在の新社名』へ変更](根拠ページのURL)`**
+  ※【リンク先の厳守ルール】:
+    - 根拠URLには、Q1検索結果の中にある「社名変更のお知らせ」「プレスリリース」「沿革」などの最も適切なURLを指定してください。（無ければ会社概要のURL）
+    - 年月日（例: 2020年4月1日）が明確にある場合のみ日付をいれ、不確実なら `[✕ 『現在の新社名』へ変更](根拠URL)` とする。
 
 ・入力会社名が全く異なる別法人の場合 → 「✕ 不一致」
 ・正式法人名が確認できない場合 → 「⚠️確認できず」
@@ -344,7 +341,7 @@ URLのパスに /company, /about, /corporate, /profile などが含まれる「�
   {{
     "company": "入力会社名",
     "official_url": "https://.../company/",
-    "company_match": "〇",
+    "company_match": "[✕ 2024年4月1日に 『クララ株式会社』へ変更](https://.../news/20240401/)",
     "kyushu_branches": [
       {{
         "name": "九州支社",
@@ -615,7 +612,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
             match_str = str(row["社名判定"])
             if match_str == "〇" or match_str.startswith("〇"):
                 st.success(f"社名判定: {match_str}")
-            elif match_str.startswith("✕"):
+            elif match_str.startswith("✕") or "✕" in match_str:
                 st.error(f"社名判定: {match_str}")
             else:
                 st.warning(f"社名判定: {match_str}")
