@@ -425,7 +425,6 @@ def analyze_companies_batch(batch_data, gemini_key):
             f"【Q2ページ本文 直読みデータ（詳細情報）】\n{item.get('scraped_text', '取得失敗 または 該当ページなし')}\n"
         )
 
-    # ★プロンプト微調整：店舗内に併設されている事業部の抽出を明記
     prompt = f"""
 あなたは企業情報調査とDX営業提案の専門家です。
 
@@ -459,7 +458,7 @@ Q1検索結果、Q2検索結果、および「Q2ページ本文 直読みデー�
 - 住所（都道府県名、市区町村、番地）、ビル名、階数（〇F）、電話番号などは「絶対に」出力しないでください。純粋な「拠点名のみ」を抽出してください。
 - 検索エンジンの抜粋の都合で「拠点名がなく、住所しか記載されていない」場合は、絶対に推測せず、空配列 [] を設定してください。
   （ダメな例：「福岡県北九州市小倉北区... Z121ビル3Ｆ」「佐賀県佐賀市駅南本町1番33号」）
-  （良い例：「九州支社」「福岡営業所」「Fukuoka Hub」「法人事業 福岡」）
+  （良い例：「九州支社」「福岡営業所」「Fukuoka Hub」「法人事業部 福岡」）
 - 子会社、関連会社の拠点は絶対に除外してください。
 - 小売店舗そのもの（一般消費者向けの販売店）は除外してください。ただし、「法人事業部」や「営業所」などの拠点機能が店舗内に併設されている場合は、その拠点名（例：「法人事業 福岡」など）を抽出してください。
 - 該当拠点がない場合、または別法人のものしかない場合は空配列 [] を設定してください。
@@ -482,7 +481,8 @@ Q1検索結果、Q2検索結果、および「Q2ページ本文 直読みデー�
 ==================================================
 【特記事項】
 ==================================================
-直近３年間の社名変更があれば、変更年月日＋変更後の会社名の情報。なければ[]。
+直近3年間の社名変更について、「社名変更年月日」と「変更後の会社名」を必ず記載してください。（例：「2023年4月1日に〇〇株式会社へ社名変更」）
+それ以外のニュースは不要です。社名変更がなければ [] を設定してください。
 
 
 {prompt_targets}
@@ -503,7 +503,7 @@ Q1検索結果、Q2検索結果、および「Q2ページ本文 直読みデー�
         "keywords": ["SFA導入", "顧客管理DX", "商談進捗管理"]
       }}
     ],
-    "notes": []
+    "notes": ["2023年4月1日に「日本電産株式会社」から「ニデック株式会社」へ社名変更"]
   }}
 ]
 """
@@ -637,7 +637,7 @@ if submit_button:
                 kyushu_branches = result.get("kyushu_branches", [])
                 if not isinstance(kyushu_branches, list):
                     kyushu_branches = []
-                kyushu_text = "、".join(str(x) for x in kyushu_branches if str(x).strip()) if kyushu_branches else "なし"
+                kyushu_text = "\n".join(str(x) for x in kyushu_branches if str(x).strip()) if kyushu_branches else "なし"
 
                 department_keywords = result.get("department_keywords", [])
                 if not isinstance(department_keywords, list):
@@ -659,14 +659,14 @@ if submit_button:
                     if not keywords:
                         continue
 
-                    department_summary.append(f"【{department}】 " + " / ".join(keywords))
+                    department_summary.append(f"【{department}】\n" + "\n".join(f"・{kw}" for kw in keywords))
 
-                department_text = "\n".join(department_summary)
+                department_text = "\n\n".join(department_summary)
 
                 notes = result.get("notes", [])
                 if not isinstance(notes, list):
                     notes = []
-                notes_text = ", ".join(str(x) for x in notes)
+                notes_text = "\n".join(str(x) for x in notes)
 
                 final_row = {
                     "会社名": company,
@@ -707,6 +707,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
     st.divider()
     st.subheader("検索・分析結果一覧")
 
+    # データフレーム（CSV出力用）
     df_display = pd.DataFrame(results)
     expected_columns = ["会社名", "会社概要URL", "社名判定", "九州拠点", "部署別IT提案", "特記事項"]
 
@@ -716,27 +717,34 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
 
     df_display = df_display[expected_columns]
 
-    st.dataframe(
-        df_display,
-        column_config={
-            "会社概要URL": st.column_config.LinkColumn(
-                "会社概要URL",
-                help="会社概要ページを開きます"
-            )
-        },
-        use_container_width=True
-    )
+    # ★【見やすさ改善】リストをMarkdownテーブルにして、複数行・折り返しを綺麗に表示
+    md_table = "| 会社名 | 会社概要URL | 社名判定 | 九州拠点 | 部署別IT提案 | 特記事項 |\n"
+    md_table += "|---|---|---|---|---|---|\n"
+    
+    for row in results:
+        company_md = row.get("会社名", "").replace("\n", " ")
+        url = row.get("会社概要URL")
+        url_md = f"[リンク]({url})" if url else "確認できず"
+        match_md = row.get("社名判定", "")
+        
+        # セル内の改行を<br>タグに変換して複数行表示に対応させる
+        kyushu_md = str(row.get("九州拠点", "")).replace("\n", "<br>")
+        it_prop_md = str(row.get("部署別IT提案", "")).replace("\n", "<br>")
+        notes_md = str(row.get("特記事項", "")).replace("\n", "<br>")
+        
+        md_table += f"| {company_md} | {url_md} | {match_md} | {kyushu_md} | {it_prop_md} | {notes_md} |\n"
+
+    st.markdown(md_table, unsafe_allow_html=True)
 
     # ======================================
-    # TSV
+    # TSV / CSV
     # ======================================
+    st.write("---")
+    
     tsv_text = df_display.to_csv(sep="\t", index=False)
     with st.expander("スプレッドシート用の一括コピー（タブ区切りテキスト）"):
         st.code(tsv_text, language="text")
 
-    # ======================================
-    # CSV
-    # ======================================
     csv_data = df_display.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
         label="結果をCSVでダウンロード",
@@ -768,7 +776,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
                 st.warning("社名判定: ⚠️確認できず")
 
             if row.get("九州拠点") and row["九州拠点"] != "なし":
-                st.info(f"**九州拠点:** {row['九州拠点']}")
+                st.info(f"**九州拠点:** \n{row['九州拠点']}")
             else:
                 st.write("**九州拠点:** なし")
 
@@ -788,7 +796,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
                         st.markdown(f"- {keyword}")
 
             if row.get("_raw_notes"):
-                st.info(f"**特記事項:** {row['_raw_notes']}")
+                st.info(f"**特記事項:** \n{row['_raw_notes']}")
 
             with st.expander("🔎 デバッグ：会社概要・公式サイト検索結果 (Q1)"):
                 q1_results = row.get("_q1_results", [])
