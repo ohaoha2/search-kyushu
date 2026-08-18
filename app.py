@@ -164,18 +164,16 @@ def candidate_entity_relation(input_company: str, candidate_text: str):
     return "unknown"
 
 # ==========================================
-# Serper API 検索 (完全に特殊コマンドを排除した安全版)
+# Serper API 検索
 # ==========================================
 def fetch_serper_results(query: str, api_key: str):
     url = "https://google.serper.dev/search"
     
-    # 検索キーワードはすべて引数(query)として受け取り、そのまま流す
-    # site: などの特殊コマンドは一切含まない純粋な文字列
     payload = {
         "q": query,
         "gl": "jp",
         "hl": "ja",
-        "num": 40  # Dodaなどのスパムを回避するため、多めに40件取得してPythonで捌く
+        "num": 40
     }
     
     headers = {
@@ -198,6 +196,33 @@ def fetch_serper_results(query: str, api_key: str):
             "snippet": item.get("snippet", "")
         })
     return results
+
+# ==========================================
+# 【新規】ページ直読み (スクレイピング) 関数
+# ==========================================
+def scrape_page_text(url: str):
+    """URLに直接アクセスし、HTMLタグを除去した本文テキストを抽出する"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=5)
+        response.encoding = response.apparent_encoding  # 文字化け対策
+        
+        if response.status_code == 200:
+            html = response.text
+            # スクリプトやスタイルシートの中身ごと削除
+            html = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
+            # HTMLタグを削除してプレーンテキスト化
+            text = re.sub(r'<[^>]+>', ' ', html)
+            # 無駄な空白や改行を圧縮
+            text = re.sub(r'\s+', ' ', text).strip()
+            
+            # AIがパンクしないよう先頭5000文字だけ取得（全国の拠点一覧ならこれで十分収まる）
+            return text[:5000]
+    except Exception:
+        pass
+    return ""
 
 # ==========================================
 # 公式候補スコア
@@ -295,7 +320,7 @@ def find_official_candidates(company: str, results: list):
 # ==========================================
 def search_company(company: str, api_key: str):
     
-    # ① Q1: 会社概要の検索 (記号を排除し、公式ページを狙うシンプルなキーワード)
+    # ① Q1: 会社概要の検索
     q1 = f'{company} 会社概要 公式'
     q1_results = fetch_serper_results(q1, api_key)
 
@@ -307,25 +332,37 @@ def search_company(company: str, api_key: str):
 
     # ② Q2: 九州拠点の検索
     q2_results = []
+    scraped_text = ""
+    
     if best_domain:
         info = parse_legal_entity(company)
         core_name = info["core"] if info["core"] else company
 
-        # ★無料枠制限の完全回避: site: や OR 等を使わず、ドメイン名を直接キーワードに混ぜてGoogleに空気を読ませる
-        q2_keywords = f'{core_name} 九州 福岡 佐賀 長崎 熊本 大分 宮崎 鹿児島 拠点 支社 営業所 {best_domain}'
+        # 地名を絞り、確実に公式の拠点ページをヒットさせる
+        q2_keywords = f'{core_name} 拠点 支社 営業所 事業所 福岡 九州 {best_domain}'
         
         raw_q2_results = fetch_serper_results(q2_keywords, api_key)
 
-        # API側で弾けない分、Pythonの関所で100%確実に公式ドメインだけを残す
         for r in raw_q2_results:
             domain = extract_domain(r["url"])
             if domain and (domain == best_domain or domain.endswith("." + best_domain)):
                 q2_results.append(r)
+                
+        # ★【最強の武器】Google結果の上位1件のURLに直接アクセスし、文字を丸ごと引っこ抜く
+        for r in q2_results:
+            url = r["url"]
+            # PDFファイルなどはエラーになるので除外
+            if not url.lower().endswith(".pdf"):
+                scraped = scrape_page_text(url)
+                if scraped:
+                    scraped_text = f"【{r['title']}】のページ直読みデータ:\n{scraped}"
+                    break # 1ページ分取得できたら十分なので終了
 
     return {
         "q1_results": q1_results,
         "q2_results": q2_results,
-        "official_candidates": official_candidates
+        "official_candidates": official_candidates,
+        "scraped_text": scraped_text  # ★AIに渡す直読みデータ
     }
 
 # ==========================================
@@ -384,13 +421,14 @@ def analyze_companies_batch(batch_data, gemini_key):
             f"【入力会社名】\n{item['company']}\n\n"
             f"【公式サイト候補】\n{candidates_text}\n\n"
             f"【Q1検索結果（会社概要用）】\n{q1_text if q1_text else 'なし'}\n\n"
-            f"【Q2検索結果（公式ドメイン内 九州拠点用）】\n{q2_text if q2_text else '公式サイト内に該当する拠点ページが見つかりませんでした'}\n"
+            f"【Q2検索結果（公式ドメイン内 九州拠点用）】\n{q2_text if q2_text else '公式サイト内に該当する拠点ページが見つかりませんでした'}\n\n"
+            f"【Q2ページ本文 直読みデータ（スニペットの文字数制限を突破した詳細情報）】\n{item.get('scraped_text', '取得失敗 または 該当ページなし')}\n"
         )
 
     prompt = f"""
 あなたは企業情報調査とDX営業提案の専門家です。
 
-提供された検索結果だけを使って判断してください。
+提供された検索結果（およびページ直読みデータ）だけを使って判断してください。
 情報を推測・補完してはいけません。
 
 
@@ -414,7 +452,7 @@ official_urlには、入力会社名の対象法人自身の「会社概要ペ�
 ==================================================
 【九州拠点】（厳密な抽出）
 ==================================================
-Q1検索結果およびQ2検索結果から、入力会社名と完全に同一の法人が直接保有している九州地方の拠点名（支社、支店、営業所、事業所、工場、事業部、Hubなど）を抽出してください。
+Q1検索結果、Q2検索結果、および「Q2ページ本文 直読みデータ」の中から、入力会社名と完全に同一の法人が直接保有している九州地方の拠点名（支社、支店、営業所、事業所、工場、事業部、Hubなど）を抽出してください。
 
 【厳格な禁止ルール】
 - 住所（都道府県名、市区町村、番地）、ビル名、階数（〇F）、電話番号などは「絶対に」出力しないでください。純粋な「拠点名のみ」を抽出してください。
@@ -502,7 +540,6 @@ if submit_button:
     elif not serper_api_key or not gemini_key:
         st.error("Streamlitの Secrets に SERPER_API_KEY または GEMINI_API_KEY が設定されていません。")
     else:
-        # キャッシュを強制リセットして再検索を確実に行う
         st.session_state.result_cache = {}
         st.session_state.pop("batch_results", None)
 
@@ -522,9 +559,9 @@ if submit_button:
 
         if companies_to_fetch:
             # ==================================
-            # Serper API (エラーを確実に画面表示)
+            # Serper API + 直読みスクレイピング
             # ==================================
-            status.text("会社概要および九州拠点を検索中... (Googleエンジンで高速抽出中)")
+            status.text("会社概要および九州拠点を検索・ページ直読み中...")
             fetched_data = []
 
             def fetch_wrapper(comp):
@@ -544,7 +581,8 @@ if submit_button:
                             "company": comp_name,
                             "q1_results": [],
                             "q2_results": [],
-                            "official_candidates": []
+                            "official_candidates": [],
+                            "scraped_text": ""
                         })
                     completed += 1
                     progress.progress((completed / len(companies_to_fetch)) * 0.4)
@@ -583,7 +621,7 @@ if submit_button:
             for company in companies_to_fetch:
                 fetched_item = next((item for item in fetched_data if item["company"] == company), None)
                 if fetched_item is None:
-                    fetched_item = {"q1_results": [], "q2_results": [], "official_candidates": []}
+                    fetched_item = {"q1_results": [], "q2_results": [], "official_candidates": [], "scraped_text": ""}
 
                 result = company_map.get(company, {})
 
@@ -640,7 +678,8 @@ if submit_button:
                     "_raw_notes": notes_text,
                     "_q1_results": fetched_item.get("q1_results", []),
                     "_q2_results": fetched_item.get("q2_results", []),
-                    "_official_candidates": fetched_item.get("official_candidates", [])
+                    "_official_candidates": fetched_item.get("official_candidates", []),
+                    "_scraped_text": fetched_item.get("scraped_text", "")
                 }
                 
                 st.session_state.result_cache[company] = final_row
@@ -773,6 +812,13 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
                         st.write(f"**URL:** {result.get('url', '')}")
                         st.write(f"**内容:** {result.get('snippet', '')}")
                         st.divider()
+                        
+            with st.expander("🔎 デバッグ：ページ直読みデータ (スクレイピング)"):
+                scraped_text = row.get("_scraped_text", "")
+                if not scraped_text:
+                    st.write("直読みデータの取得はありませんでした。")
+                else:
+                    st.write(scraped_text)
 
             with st.expander("🔎 デバッグ：公式候補"):
                 candidates = row.get("_official_candidates", [])
