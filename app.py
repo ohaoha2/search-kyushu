@@ -460,7 +460,7 @@ def analyze_companies_batch(batch_data, gemini_key):
 【重要】検索結果テキスト内に明記されていない事実・日付を推測や計算で算出して補完することは厳禁です。
 
 ==================================================
-【official_url】（会社概要URLの選定）
+【official_url】（会社概要の選定）
 ==================================================
 対象企業の「会社概要・企業情報ページ」のURLを記載してください。
 旧社名で入力された場合でも、検索結果にある現在の新社名のコーポレートサイト/会社概要/IRページのURL（例: idom-inc.com, lycorp.co.jp 等）を設定してください。
@@ -470,7 +470,7 @@ def analyze_companies_batch(batch_data, gemini_key):
 【九州拠点】（厳密な抽出とURLの紐付け）
 ==================================================
 検索結果の中から、対象法人が直接保有している九州地方の拠点名（支社、支店、営業所、工場など）を抽出してください。
-抽出した拠点ごとに、情報が記載されていたページの「URL」もセットで出力してください。ドメインがofficial_urlと一致するものを選んでください。
+抽出した拠点ごとに、情報が記載されていたページの「URL」もセットで出力してください。必ずドメインがofficial_urlと一致するものを選んでください。
 【重要】入力会社名と「完全一致」する会社の拠点のみを抽出してください。関連会社、子会社、グループ会社等の拠点は、絶対に抽出しないでください。
 
 【厳格な禁止ルール】
@@ -494,7 +494,7 @@ STEP 2: 【入力会社名】と【現在の最新の正式法人名】を比較
   （例： [✕ 2023/10/1『LINEヤフー株式会社』へ変更](https://www.lycorp.co.jp/...) ）
   （例： [✕ 2016/7/15『株式会社IDOM』へ変更](https://idom-inc.com/ir/company/) ）
   （例： [✕ 2020/4/1『株式会社日立ハイテク』へ変更](https://www.hitachi-hightech.com/...) ）
-  ※【リンクURLの指定】: Q1検索結果にある社名変更のお知らせ、沿革、プレスリリース、または新会社の会社概要URLを設定すること。
+  ※【リンクURLの指定】: Q1検索結果にある社名変更のお知らせ、沿革、プレスリリース、または新会社の会社概要を設定すること。
   ※【装飾の禁止】: バッククォート（`）やアスタリスク（**）などの装飾記号は出力に一切入れないでください。純粋な `[テキスト](URL)` のみ。
 
 ・入力会社名が全く異なる別法人の場合 → 「✕ 不一致」
@@ -770,7 +770,7 @@ if submit_button:
 
         final_row = {
             "会社名": company,
-            "会社概要URL": official_url,
+            "会社概要": official_url,
             "社名判定": company_match,
             "九州拠点": kyushu_text,
             "部署別IT": department_text,
@@ -806,7 +806,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
   st.subheader("検索結果一覧")
 
   df_display = pd.DataFrame(results)
-  expected_columns = ["会社名", "会社概要URL", "社名判定", "九州拠点", "部署別IT"]
+  expected_columns = ["会社名", "会社概要", "社名判定", "九州拠点", "部署別IT"]
 
   for col in expected_columns:
     if col not in df_display.columns:
@@ -814,12 +814,12 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
 
   df_display = df_display[expected_columns]
 
-  md_table = "| 会社名 | 会社概要URL | 社名判定 | 九州拠点 | 部署別IT |\n"
+  md_table = "| 会社名 | 会社概要 | 社名判定 | 九州拠点 | 部署別IT |\n"
   md_table += "|---|---|---|---|---|\n"
 
   for row in results:
     company_md = row.get("会社名", "").replace("\n", " ")
-    url = row.get("会社概要URL")
+    url = row.get("会社概要")
     url_md = f"[リンク]({url})" if url else "確認できず"
     match_md = row.get("社名判定", "")
 
@@ -859,12 +859,12 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
   for row in results:
     with st.expander(f"{row['会社名']} ── 【{row['社名判定']}】"):
 
-      if row.get("会社概要URL"):
+      if row.get("会社概要"):
         st.markdown(
-            f"**会社概要URL:** [{row['会社概要URL']}]({row['会社概要URL']})"
+            f"**会社概要:** [{row['会社概要']}]({row['会社概要']})"
         )
       else:
-        st.write("**会社概要URL:** 確認できず")
+        st.write("**会社概要:** 確認できず")
 
       match_str = str(row["社名判定"])
       if match_str == "〇" or match_str.startswith("〇"):
