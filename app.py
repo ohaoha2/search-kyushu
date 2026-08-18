@@ -3,7 +3,6 @@ import json
 import os
 import re
 import pandas as pd
-import concurrent.futures
 from urllib.parse import urlparse
 from tavily import TavilyClient
 from google import genai
@@ -30,7 +29,7 @@ gemini_key = (
 )
 
 # ==========================================
-# セッションステート (キャッシュ)
+# セッションステート
 # ==========================================
 if "search_history" not in st.session_state:
     st.session_state.search_history = []
@@ -42,27 +41,53 @@ if "result_cache" not in st.session_state:
 # 法人格一覧
 # ==========================================
 LEGAL_FORMS = [
-    "株式会社", "有限会社", "合同会社", "合資会社", "合名会社",
-    "一般社団法人", "一般財団法人", "公益社団法人", "公益財団法人",
-    "学校法人", "医療法人", "社会福祉法人", "宗教法人", "特定非営利活動法人",
-    "NPO法人", "独立行政法人", "国立大学法人", "地方独立行政法人",
-    "相互会社", "信用金庫", "信用組合",
+    "株式会社",
+    "有限会社",
+    "合同会社",
+    "合資会社",
+    "合名会社",
+    "一般社団法人",
+    "一般財団法人",
+    "公益社団法人",
+    "公益財団法人",
+    "学校法人",
+    "医療法人",
+    "社会福祉法人",
+    "宗教法人",
+    "特定非営利活動法人",
+    "NPO法人",
+    "独立行政法人",
+    "国立大学法人",
+    "地方独立行政法人",
+    "相互会社",
+    "信用金庫",
+    "信用組合",
 ]
 
 # ==========================================
 # 第三者サイト除外（最小限）
 # ==========================================
 def is_excluded_domain(domain: str):
+
     if not domain:
         return True
 
     excluded_domains = [
-        "wikipedia.org", "irbank.net", "compalyze.co.jp", "houjin.jp", 
-        "xn--pckua2a7gp15o89zb.com", "baseconnect.in"
+        "wikipedia.org", "yahoo.co.jp", "news.yahoo.co.jp", "nikkei.com",
+        "toyokeizai.net", "mynavi.jp", "rikunabi.com", "en-japan.com",
+        "wantedly.com", "indeed.com", "onecareer.jp", "doda.jp",
+        "bizreach.jp", "green-japan.com", "metoree.com", "navitime.co.jp",
+        "irbank.net", "xn--pckua2a7gp15o89zb.com", "pr.mono.ipros.com", 
+        "ipros.com", "atengineer.com", "baseconnect.in", "houjin.jp", "prtimes.jp",
+        "compalyze.co.jp", "jpma.or.jp", "mapion.co.jp", "ekiten.jp",
+        "e-shops.jp", "jmty.jp", "phonebook.jp", "itp.ne.jp", "bizloop.jp",
+        "salesnow.jp", "syukatsu-kaigi.jp", "jobtalk.jp", "openwork.jp",
+        "en-hyouban.com"
     ]
 
     return any(
-        domain == excluded or domain.endswith("." + excluded)
+        domain == excluded
+        or domain.endswith("." + excluded)
         for excluded in excluded_domains
     )
 
@@ -126,6 +151,7 @@ def candidate_entity_relation(input_company: str, candidate_text: str):
     input_core = input_info["core"]
     input_form = input_info["legal_form"]
 
+    # 前株・後株の逆パターンを厳密排除
     if input_core and input_form:
         opposite_company = ""
         if input_info["position"] == "front":
@@ -154,8 +180,11 @@ def candidate_entity_relation(input_company: str, candidate_text: str):
 
         if (
             form == input_form
-            and ((input_info["position"] == "front" and has_front) or
-                 (input_info["position"] == "back" and has_back))
+            and (
+                (input_info["position"] == "front" and has_front)
+                or
+                (input_info["position"] == "back" and has_back)
+            )
         ):
             return "match"
 
@@ -306,10 +335,13 @@ def search_company(company: str, api_key: str):
     # ② Q2: 九州拠点の検索
     q2_results = []
     if best_domain:
+        # 【超重要】 site:コマンドを使って検索エンジンの根元からドメインを絞り込む
+        # これにより、Dodaやマイナビがトップ20を埋め尽くす現象を100%防ぐ
         q2_keywords = f'site:{best_domain} 九州 OR 福岡 OR 佐賀 OR 長崎 OR 熊本 OR 大分 OR 宮崎 OR 鹿児島 拠点 OR 支社 OR 支店 OR 営業所 OR 事業所 OR 事業部 OR 工場 OR Hub'
         
         raw_q2_results = fetch_tavily_results(q2_keywords, api_key)
 
+        # 念のためのPython側の関所
         for r in raw_q2_results:
             domain = extract_domain(r["url"])
             if domain and (domain == best_domain or domain.endswith("." + best_domain)):
@@ -430,13 +462,13 @@ Q1検索結果およびQ2検索結果から、入力会社名と完全に同一�
 ==================================================
 【部署別IT提案】
 ==================================================
-対象企業の事業内容を踏まえ、IT営業で提案できるITツールを、1部署につき3個。
+対象企業の事業内容を踏まえ、IT営業で提案できる部署を最大4つ。1部署につき3～4個。
 
 
 ==================================================
 【特記事項】
 ==================================================
-直近３年間の社名変更のみ。なければ[]。
+2023年8月14日以降の重要事項のみ。なければ[]。
 
 
 {prompt_targets}
@@ -482,7 +514,7 @@ Q1検索結果およびQ2検索結果から、入力会社名と完全に同一�
 with st.form(key="batch_search_form"):
     raw_input = st.text_area(
         "会社名リストを入力（スプレッドシートからそのまま貼り付け可能）",
-        placeholder="株式会社○○○○",
+        placeholder="株式会社ニデック\nアステラス製薬株式会社\n株式会社ニトリ",
         height=180
     )
     submit_button = st.form_submit_button("一括検索・分析を実行", type="primary")
@@ -496,7 +528,7 @@ if submit_button:
     elif not tavily_api_key or not gemini_key:
         st.error("Streamlitの Secrets に TAVILY_API_KEY または GEMINI_API_KEY が設定されていません。")
     else:
-        # キャッシュをリセットせず残す（API節約）
+        st.session_state.result_cache = {}
         st.session_state.pop("batch_results", None)
 
         lines = raw_input.strip().split("\n")
@@ -507,151 +539,121 @@ if submit_button:
             if company and company not in company_list:
                 company_list.append(company)
 
-        # キャッシュの振り分け
-        companies_to_fetch = []
-        final_results = []
-        
-        for company in company_list:
-            if company in st.session_state.result_cache:
-                final_results.append(st.session_state.result_cache[company])
-            else:
-                companies_to_fetch.append(company)
-
         progress = st.progress(0)
         status = st.empty()
 
-        if companies_to_fetch:
-            # ==================================
-            # Tavily (マルチスレッドで並列高速化)
-            # ==================================
-            status.text("会社概要および九州拠点を検索中... (並列処理により高速化中)")
-            fetched_data = []
+        # ==================================
+        # Tavily
+        # ==================================
+        status.text("会社概要および九州拠点を検索中...")
+        fetched_data = []
 
-            def fetch_wrapper(comp):
-                data = search_company(comp, tavily_api_key)
-                return {"company": comp, **data}
+        for i, company in enumerate(company_list):
+            search_data = search_company(company, tavily_api_key)
+            fetched_data.append({
+                "company": company,
+                "q1_results": search_data["q1_results"],
+                "q2_results": search_data["q2_results"],
+                "official_candidates": search_data["official_candidates"]
+            })
+            progress.progress(((i + 1) / max(len(company_list), 1)) * 0.5)
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-                futures = {executor.submit(fetch_wrapper, comp): comp for comp in companies_to_fetch}
-                completed = 0
-                for future in concurrent.futures.as_completed(futures):
-                    try:
-                        fetched_data.append(future.result())
-                    except Exception as e:
-                        st.error(f"{futures[future]}の検索中にエラー: {e}")
-                    completed += 1
-                    progress.progress((completed / len(companies_to_fetch)) * 0.4)
+        # ==================================
+        # Gemini
+        # ==================================
+        status.text("AIによる会社概要・社名照合中...")
+        company_map = {}
+        chunk_size = 5
 
-            # ==================================
-            # Gemini (マルチスレッドで並列高速化)
-            # ==================================
-            status.text("AIによる会社概要・社名照合中... (並列処理により高速化中)")
-            company_map = {}
-            chunk_size = 5
-            chunks = [fetched_data[i:i + chunk_size] for i in range(0, len(fetched_data), chunk_size)]
+        for start in range(0, len(fetched_data), chunk_size):
+            chunk = fetched_data[start:start + chunk_size]
+            response_list = analyze_companies_batch(chunk, gemini_key)
 
-            def gemini_wrapper(chunk):
-                return analyze_companies_batch(chunk, gemini_key)
+            if isinstance(response_list, list):
+                for result in response_list:
+                    company = result.get("company")
+                    if company:
+                        company_map[company] = result
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                futures = [executor.submit(gemini_wrapper, chunk) for chunk in chunks]
-                completed_chunks = 0
-                for future in concurrent.futures.as_completed(futures):
-                    try:
-                        res_list = future.result()
-                        if isinstance(res_list, list):
-                            for r in res_list:
-                                comp = r.get("company")
-                                if comp:
-                                    company_map[comp] = r
-                    except Exception as e:
-                        st.error(f"Gemini処理中にエラー: {e}")
-                    completed_chunks += 1
-                    progress.progress(0.4 + (completed_chunks / len(chunks)) * 0.5)
+            progress.progress(0.5 + ((start + len(chunk)) / max(len(fetched_data), 1)) * 0.5)
 
-            # ==================================
-            # 最終整形・キャッシュ保存
-            # ==================================
-            status.text("結果を整形中...")
-            for company in companies_to_fetch:
-                fetched_item = next((item for item in fetched_data if item["company"] == company), None)
-                if fetched_item is None:
-                    fetched_item = {"q1_results": [], "q2_results": [], "official_candidates": []}
+        # ==================================
+        # 最終整形
+        # ==================================
+        batch_results = []
 
-                result = company_map.get(company, {})
+        for company in company_list:
+            fetched_item = next((item for item in fetched_data if item["company"] == company), None)
+            if fetched_item is None:
+                fetched_item = {"q1_results": [], "q2_results": [], "official_candidates": []}
 
-                official_url = result.get("official_url")
-                if official_url in ["", "null"]:
-                    official_url = None
+            result = company_map.get(company, {})
 
-                company_match = result.get("company_match", "⚠️確認できず")
-                if company_match not in ["〇 一致", "✕ 不一致", "⚠️確認できず"]:
-                    company_match = "⚠️確認できず"
+            # 会社概要URL
+            official_url = result.get("official_url")
+            if official_url in ["", "null"]:
+                official_url = None
 
-                kyushu_branches = result.get("kyushu_branches", [])
-                if not isinstance(kyushu_branches, list):
-                    kyushu_branches = []
-                kyushu_text = "、".join(str(x) for x in kyushu_branches if str(x).strip()) if kyushu_branches else "なし"
+            # 社名判定
+            company_match = result.get("company_match", "⚠️確認できず")
+            if company_match not in ["〇 一致", "✕ 不一致", "⚠️確認できず"]:
+                company_match = "⚠️確認できず"
 
-                department_keywords = result.get("department_keywords", [])
-                if not isinstance(department_keywords, list):
-                    department_keywords = []
+            # 九州拠点
+            kyushu_branches = result.get("kyushu_branches", [])
+            if not isinstance(kyushu_branches, list):
+                kyushu_branches = []
+            kyushu_text = "、".join(str(x) for x in kyushu_branches if str(x).strip()) if kyushu_branches else "なし"
 
-                department_summary = []
-                for item in department_keywords:
-                    if not isinstance(item, dict):
-                        continue
-                    department = str(item.get("department", "")).strip()
-                    keywords = item.get("keywords", [])
-                    
-                    if not department:
-                        continue
-                    if not isinstance(keywords, list):
-                        keywords = []
+            # 部署別IT提案
+            department_keywords = result.get("department_keywords", [])
+            if not isinstance(department_keywords, list):
+                department_keywords = []
 
-                    keywords = [str(x) for x in keywords if str(x).strip()]
-                    if not keywords:
-                        continue
-
-                    department_summary.append(f"【{department}】 " + " / ".join(keywords))
-
-                department_text = "\n".join(department_summary)
-
-                notes = result.get("notes", [])
-                if not isinstance(notes, list):
-                    notes = []
-                notes_text = ", ".join(str(x) for x in notes)
-
-                # 保存用データ作成
-                final_row = {
-                    "会社名": company,
-                    "会社概要URL": official_url,
-                    "社名判定": company_match,
-                    "九州拠点": kyushu_text,
-                    "部署別IT提案": department_text,
-                    "特記事項": notes_text,
-                    "_raw_keywords": department_keywords,
-                    "_raw_notes": notes_text,
-                    "_q1_results": fetched_item.get("q1_results", []),
-                    "_q2_results": fetched_item.get("q2_results", []),
-                    "_official_candidates": fetched_item.get("official_candidates", [])
-                }
+            department_summary = []
+            for item in department_keywords:
+                if not isinstance(item, dict):
+                    continue
+                department = str(item.get("department", "")).strip()
+                keywords = item.get("keywords", [])
                 
-                # キャッシュに保存（次回以降はAPI消費ゼロ）
-                st.session_state.result_cache[company] = final_row
-                final_results.append(final_row)
+                if not department:
+                    continue
+                if not isinstance(keywords, list):
+                    keywords = []
+
+                keywords = [str(x) for x in keywords if str(x).strip()]
+                if not keywords:
+                    continue
+
+                department_summary.append(f"【{department}】 " + " / ".join(keywords))
+
+            department_text = "\n".join(department_summary)
+
+            # 特記事項
+            notes = result.get("notes", [])
+            if not isinstance(notes, list):
+                notes = []
+            notes_text = ", ".join(str(x) for x in notes)
+
+            # 保存
+            batch_results.append({
+                "会社名": company,
+                "会社概要URL": official_url,
+                "社名判定": company_match,
+                "九州拠点": kyushu_text,
+                "部署別IT提案": department_text,
+                "特記事項": notes_text,
+                "_raw_keywords": department_keywords,
+                "_raw_notes": notes_text,
+                "_q1_results": fetched_item.get("q1_results", []),
+                "_q2_results": fetched_item.get("q2_results", []),
+                "_official_candidates": fetched_item.get("official_candidates", [])
+            })
 
         progress.progress(1.0)
         status.text("すべての処理が完了しました。")
-
-        # 表示順を入力順にソート（キャッシュ分と新規分が混ざるため）
-        ordered_results = []
-        for comp in company_list:
-            row = next((r for r in final_results if r["会社名"] == comp), None)
-            if row:
-                ordered_results.append(row)
-
-        st.session_state["batch_results"] = ordered_results
+        st.session_state["batch_results"] = batch_results
 
 # ==========================================
 # 結果表示
