@@ -53,6 +53,17 @@ def extract_domain(url: str):
     except Exception:
         return None
 
+def extract_main_domain(domain: str):
+    """サブドメイン（holdings.panasonic等）を除いたメインの識別名を抽出"""
+    if not domain:
+        return ""
+    parts = domain.split(".")
+    if len(parts) >= 3 and parts[-2] in ["co", "com", "ne", "or", "go", "ac", "lg"]:
+        return parts[-3]
+    if len(parts) >= 2:
+        return parts[-2]
+    return domain
+
 def normalize_company_name(name: str):
     if not name:
         return ""
@@ -232,15 +243,23 @@ def search_company(company: str, api_key: str):
     if best_domain:
         info = parse_legal_entity(company)
         core_name = info["core"] if info["core"] else company
-        q2_keywords = f'{core_name} 九州 福岡 拠点 支社 支店 営業所 事業所 Office拠点'
+        
+        # パナソニック等で「ホールディングス」がついている場合でもコア名（パナソニック）で検索
+        clean_core = re.sub(r'(ホールディングス|HD)$', '', core_name)
+        q2_keywords = f'{clean_core} 九州 福岡 拠点 支社 支店 営業所 事業所 Office拠点'
         raw_q2_results = fetch_serper_results(q2_keywords, api_key)
+
+        best_main = extract_main_domain(best_domain)
 
         for r in raw_q2_results:
             domain = extract_domain(r["url"])
-            if domain and (domain == best_domain or domain.endswith("." + best_domain)):
-                q2_results.append(r)
+            if domain:
+                main_dom = extract_main_domain(domain)
+                # メインドメインの一致（例：holdings.panasonic と panasonic.com の相互マッチ）を許容
+                if main_dom == best_main or domain == best_domain or domain.endswith("." + best_domain):
+                    q2_results.append(r)
                 
-        # パナソニックなどの大企業対策：最大3件まで直読みして網羅性を高める
+        # 上位最大3件まで直読みして大企業の拠点網羅性を向上
         for r in q2_results[:3]:
             url = r["url"]
             if not url.lower().endswith(".pdf"):
@@ -289,7 +308,7 @@ def analyze_companies_batch(batch_data, gemini_key):
 
 【最重要禁止事項】
 - 検索結果内に明記されていない事実・日付・社名を推測や計算で算出して補完することは厳禁です。
-- 無関係な数値（例：「57日」等）から架空の日付を作成することは絶対に禁止です。
+- 無関係な数値から架空の日付を作成することは絶対に禁止です。
 
 ==================================================
 【official_url】
@@ -308,21 +327,22 @@ URLのパスに /company, /about, /corporate, /profile などが含まれる「�
 - 子会社や別法人の拠点（入力会社名と異なる会社名の拠点）は完全に除外してください。
 
 ==================================================
-【company_match】（社名判定と社名変更の厳格ルール）
+【company_match】（社名判定の最優先厳格ルール）
 ==================================================
-1. 検索結果テキストから対象企業の【現在の最新の正式法人名】を特定する。
-2. 【入力会社名】と【現在の最新の正式法人名】を厳密に比較する。
+STEP 1: 検索結果から対象企業の【現在の最新の正式社名】を特定する。
+STEP 2: 【入力会社名】と【現在の最新の正式社名】を比較する。
 
-・【入力会社名】が【現在の最新の正式法人名】と完全に一致している場合：
-  → **絶対に「〇」** とだけ出力してください。
-  ※過去に社名変更履歴があった企業であっても、入力された名前が現在の最新正式社名であれば判定は100%「〇」です。
+・【入力会社名】が【現在の最新の正式社名】と一致している場合（表記の揺れやスペース差含む）：
+  → **絶対に「〇」** とだけ出力してください！
+  ※過去にどれほど社名変更履歴があった企業であっても（例：日本電産→ニデック、クララオンライン→クララ、日立ハイテクノロジーズ→日立ハイテク）、入力された名前が「現在の最新の正式社名」であれば判定は100%「〇」です。「✕」や「変更」の文字を含めることは厳禁です！
 
-・【入力会社名】が『過去の旧社名』であり、現在は別の新社名に変更されている場合（例：「株式会社日立ハイテクノロジーズ」→「株式会社日立ハイテク」、「株式会社クララオンライン」→「クララ株式会社」など）：
-  → テキスト全体をMarkdownリンクにし、以下のフォーマットで出力してください。
-  フォーマット： **`[✕ [変更年月日] 『現在の新社名』へ変更](根拠ページのURL)`**
-  ※【リンク先の厳守ルール】:
-    - 根拠URLには、Q1検索結果の中にある「社名変更のお知らせ」「プレスリリース」「沿革」などの最も適切なURLを指定してください。（無ければ会社概要のURL）
-    - 年月日（例: 2020年4月1日）が明確にある場合のみ日付をいれ、不確実なら `[✕ 『現在の新社名』へ変更](根拠URL)` とする。
+・【入力会社名】が『過去の旧社名』であり、現在は別の新社名に変更されている場合のみ：
+  → テキスト全体を1つのMarkdownリンクにし、以下のフォーマットで出力してください。
+  フォーマット： [✕ [変更年月日] 『現在の新社名』へ変更](根拠ページのURL)
+  （例： [✕ 2023年4月1日に 『ニデック株式会社』へ変更](https://www.nidec.com/jp/...) ）
+  （例： [✕ 2024年4月1日に 『クララ株式会社』へ変更](https://www.clara.co.jp/...) ）
+  （例： [✕ 2020年4月1日に 『株式会社日立ハイテク』へ変更](https://www.hitachi-hightech.com/...) ）
+  ※注意：バッククォート（`）や太字アスタリスク（**）などの装飾記号は一切含めず、純粋な `[テキスト](URL)` の形式だけにしてください。
 
 ・入力会社名が全く異なる別法人の場合 → 「✕ 不一致」
 ・正式法人名が確認できない場合 → 「⚠️確認できず」
@@ -341,7 +361,7 @@ URLのパスに /company, /about, /corporate, /profile などが含まれる「�
   {{
     "company": "入力会社名",
     "official_url": "https://.../company/",
-    "company_match": "[✕ 2024年4月1日に 『クララ株式会社』へ変更](https://.../news/20240401/)",
+    "company_match": "〇",
     "kyushu_branches": [
       {{
         "name": "九州支社",
@@ -471,7 +491,28 @@ if submit_button:
                 if official_url in ["", "null"]:
                     official_url = None
 
-                company_match = result.get("company_match", "⚠️確認できず")
+                company_match = str(result.get("company_match", "⚠️確認できず")).strip()
+                
+                # 余計な装飾記号を除去
+                company_match = company_match.replace("**", "").replace("`", "").strip()
+
+                # ★【Python側のフェイルセーフ自動補正】
+                # 入力社名と現在の正式社名が実質同じなのにAIが「✕ ...へ変更」とした場合の自動救済
+                norm_input = normalize_company_name(company)
+                match_new_name = re.search(r"[『「](.*?)[』」]", company_match)
+                if match_new_name:
+                    extracted_new_name = normalize_company_name(match_new_name.group(1))
+                    if extracted_new_name and (extracted_new_name == norm_input or candidate_entity_relation(company, extracted_new_name) == "match"):
+                        company_match = "〇"
+
+                # 入力社名コア部分が変更後文脈に含まれていて、「✕」が付いている場合のチェック
+                if ("へ変更" in company_match or "に変更" in company_match) and "✕" in company_match:
+                    for form in LEGAL_FORMS:
+                        clean_input = norm_input.replace(form, "")
+                        if clean_input and len(clean_input) >= 3:
+                            if f"『{company}』" in company_match or f"「{company}」" in company_match or f"『{clean_input}" in company_match:
+                                company_match = "〇"
+                                break
 
                 kyushu_branches = result.get("kyushu_branches", [])
                 if not isinstance(kyushu_branches, list):
