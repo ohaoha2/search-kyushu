@@ -514,7 +514,7 @@ Q1検索結果およびQ2検索結果から、入力会社名と完全に同一�
 with st.form(key="batch_search_form"):
     raw_input = st.text_area(
         "会社名リストを入力（スプレッドシートからそのまま貼り付け可能）",
-        placeholder="株式会社ニデック\nアステラス製薬株式会社\n株式会社ニトリ",
+        placeholder="株式会社○○○○",
         height=180
     )
     submit_button = st.form_submit_button("一括検索・分析を実行", type="primary")
