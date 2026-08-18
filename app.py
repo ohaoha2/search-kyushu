@@ -50,13 +50,12 @@ LEGAL_FORMS = [
 ]
 
 # ==========================================
-# 第三者サイト除外（最小限）
+# 第三者サイト除外
 # ==========================================
 def is_excluded_domain(domain: str):
     if not domain:
         return True
 
-    # 純粋な機械収集の企業データベースのみに絞る
     excluded_domains = [
         "wikipedia.org", "irbank.net", "compalyze.co.jp", "houjin.jp", 
         "xn--pckua2a7gp15o89zb.com", "baseconnect.in"
@@ -165,24 +164,18 @@ def candidate_entity_relation(input_company: str, candidate_text: str):
     return "unknown"
 
 # ==========================================
-# Serper API 検索 (無料枠エラー回避版)
+# Serper API 検索 (完全に特殊コマンドを排除した安全版)
 # ==========================================
-def fetch_serper_results(query: str, api_key: str, include_domains: list = None):
+def fetch_serper_results(query: str, api_key: str):
     url = "https://google.serper.dev/search"
     
-    # ★無料枠制限の回避: 「-site:」「OR」「()」を使わず超シンプルなクエリにする
-    if include_domains and len(include_domains) > 0:
-        # site: ドメイン名 だけであれば無料枠でも許可される
-        final_query = f"{query} site:{include_domains[0]}"
-    else:
-        # 除外検索(-site:)はAPI側で行わず、Pythonのフィルタに任せる
-        final_query = query
-
+    # 検索キーワードはすべて引数(query)として受け取り、そのまま流す
+    # site: などの特殊コマンドは一切含まない純粋な文字列
     payload = {
-        "q": final_query,
+        "q": query,
         "gl": "jp",
         "hl": "ja",
-        "num": 20
+        "num": 40  # Dodaなどのスパムを回避するため、多めに40件取得してPythonで捌く
     }
     
     headers = {
@@ -265,7 +258,6 @@ def find_official_candidates(company: str, results: list):
         snippet = result.get("snippet", "")
         domain = extract_domain(url)
 
-        # Python側で確実にスパムサイトを弾く
         if not domain or is_excluded_domain(domain):
             continue
 
@@ -303,8 +295,8 @@ def find_official_candidates(company: str, results: list):
 # ==========================================
 def search_company(company: str, api_key: str):
     
-    # ① Q1: 会社概要の検索
-    q1 = f'"{company}" 会社概要'
+    # ① Q1: 会社概要の検索 (記号を排除し、公式ページを狙うシンプルなキーワード)
+    q1 = f'{company} 会社概要 公式'
     q1_results = fetch_serper_results(q1, api_key)
 
     official_candidates = find_official_candidates(company, q1_results)
@@ -319,11 +311,12 @@ def search_company(company: str, api_key: str):
         info = parse_legal_entity(company)
         core_name = info["core"] if info["core"] else company
 
-        # ★無料枠制限の回避: 「()」と「OR」を排除し、Googleのセマンティック検索に任せる
-        q2_keywords = f'{core_name} 九州 福岡 拠点 支社 支店 営業所 事業所 工場'
+        # ★無料枠制限の完全回避: site: や OR 等を使わず、ドメイン名を直接キーワードに混ぜてGoogleに空気を読ませる
+        q2_keywords = f'{core_name} 九州 福岡 佐賀 長崎 熊本 大分 宮崎 鹿児島 拠点 支社 営業所 {best_domain}'
         
-        raw_q2_results = fetch_serper_results(q2_keywords, api_key, include_domains=[best_domain])
+        raw_q2_results = fetch_serper_results(q2_keywords, api_key)
 
+        # API側で弾けない分、Pythonの関所で100%確実に公式ドメインだけを残す
         for r in raw_q2_results:
             domain = extract_domain(r["url"])
             if domain and (domain == best_domain or domain.endswith("." + best_domain)):
