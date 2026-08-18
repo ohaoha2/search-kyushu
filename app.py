@@ -355,7 +355,6 @@ def search_company(company: str, api_key: str):
             if not url.lower().endswith(".pdf"):
                 scraped = scrape_page_text(url)
                 if scraped:
-                    # ★AIがURLを紐付けやすいよう、明示的にURLを記載する
                     scraped_text = f"【{r['title']}】(URL: {url}) のページ直読みデータ:\n{scraped}"
                     break
 
@@ -426,7 +425,7 @@ def analyze_companies_batch(batch_data, gemini_key):
             f"【Q2ページ本文 直読みデータ（詳細情報）】\n{item.get('scraped_text', '取得失敗 または 該当ページなし')}\n"
         )
 
-    # ★プロンプト修正：九州拠点の出力形式を URL付きのオブジェクト に変更
+    # ★プロンプト修正：子会社の確実な除外、社名変更の方向性の厳格化
     prompt = f"""
 あなたは企業情報調査とDX営業提案の専門家です。
 
@@ -460,7 +459,8 @@ Q1検索結果、Q2検索結果、および「Q2ページ本文 直読みデー�
 【厳格な禁止ルール】
 - 住所（都道府県名、市区町村、番地）、ビル名、階数（〇F）、電話番号などは「絶対に」出力しないでください。純粋な「拠点名のみ」を抽出してください。
 - 検索エンジンの抜粋の都合で「拠点名がなく、住所しか記載されていない」場合は、絶対に推測せず、空配列 [] を設定してください。
-- 子会社、関連会社の拠点は絶対に除外してください。
+- 【最重要】子会社、グループ会社、関連会社の拠点は「絶対に」除外してください。拠点名に「入力会社名とは異なる法人名（株式会社○○、○○株式会社など）」が含まれている場合は、別法人の拠点であるため絶対に抽出しないでください。
+  （ダメな例：「ニデックオーケーケー株式会社 九州支社」「株式会社TAKISAWA 福岡営業所」 → これらは入力会社名と異なる別法人なので除外！）
 - 小売店舗そのもの（一般消費者向けの販売店）は除外してください。ただし、「法人事業部」や「営業所」などの拠点機能が店舗内に併設されている場合は、その拠点名（例：「法人事業 福岡」など）を抽出してください。
 - 該当拠点がない場合、または別法人のものしかない場合は空配列 [] を設定してください。
 
@@ -474,7 +474,7 @@ Q1検索結果、Q2検索結果、および「Q2ページ本文 直読みデー�
 
 
 ==================================================
-【部署別IT提案】
+【部署別IT】
 ==================================================
 対象企業の事業内容を踏まえ、IT営業で提案できるITツールを、1部署につき3個。
 
@@ -482,10 +482,11 @@ Q1検索結果、Q2検索結果、および「Q2ページ本文 直読みデー�
 ==================================================
 【特記事項】（厳格なファクトチェック）
 ==================================================
-直近3年間の社名変更について記載してください。
-- 検索結果に「社名変更年月日」が明記されている場合：「〇年〇月〇日に『変更後の会社名』へ社名変更」と記載してください。
-- 検索結果から日付が特定できないが、社名変更の事実がある場合：日付は絶対に推測せず、「『変更後の会社名』へ社名変更」とだけ記載してください。（例：「クララ株式会社へ社名変更」）
-それ以外のニュースは不要です。社名変更がなければ [] を設定してください。
+直近3年間の社名変更の履歴があれば記載してください。
+【最重要】必ず「変更前（旧社名）」と「変更後（新社名）」の方向を絶対に間違えないでください。
+- 検索結果に「社名変更年月日」が明記されている場合：「〇年〇月〇日に『旧社名』から『新社名』へ社名変更」と記載してください。
+- 日付が特定できない場合：日付は推測せず、「『旧社名』から『新社名』へ社名変更」と記載してください。
+- 変更の事実がない、または不明な場合は [] を設定してください。
 
 
 {prompt_targets}
@@ -515,7 +516,7 @@ Q1検索結果、Q2検索結果、および「Q2ページ本文 直読みデー�
         "keywords": ["SFA導入", "顧客管理DX", "商談進捗管理"]
       }}
     ],
-    "notes": ["クララ株式会社へ社名変更"] 
+    "notes": ["2023年4月1日に「日本電産株式会社」から「ニデック株式会社」へ社名変更"] 
   }}
 ]
 """
@@ -542,7 +543,7 @@ with st.form(key="batch_search_form"):
         placeholder="株式会社○○○○\n株式会社△△△",
         height=180
     )
-    submit_button = st.form_submit_button("一括検索・分析を実行", type="primary")
+    submit_button = st.form_submit_button("検索", type="primary")
 
 # ==========================================
 # 実行
@@ -574,7 +575,7 @@ if submit_button:
             # ==================================
             # Serper API + 直読みスクレイピング
             # ==================================
-            status.text("会社概要および九州拠点を検索・ページ直読み中...")
+            status.text("検索中...")
             fetched_data = []
 
             def fetch_wrapper(comp):
@@ -603,7 +604,7 @@ if submit_button:
             # ==================================
             # Gemini (マルチスレッド並列処理)
             # ==================================
-            status.text("AIによる会社概要・社名照合中...")
+            status.text("分析中...")
             company_map = {}
             chunk_size = 5
             chunks = [fetched_data[i:i + chunk_size] for i in range(0, len(fetched_data), chunk_size)]
@@ -646,7 +647,6 @@ if submit_button:
                 if company_match not in ["〇 一致", "✕ 不一致", "⚠️確認できず"]:
                     company_match = "⚠️確認できず"
 
-                # ★ 新しい拠点スキーマ（辞書のリスト）をMarkdown形式のリンクに変換
                 kyushu_branches = result.get("kyushu_branches", [])
                 if not isinstance(kyushu_branches, list):
                     kyushu_branches = []
@@ -661,7 +661,7 @@ if submit_button:
                                 branch_md_list.append(f"[{b_name}]({b_url})")
                             else:
                                 branch_md_list.append(b_name)
-                    elif isinstance(b, str) and b.strip(): # フォールバック（AIが以前の形式で返した場合）
+                    elif isinstance(b, str) and b.strip():
                         branch_md_list.append(b.strip())
 
                 kyushu_text = "\n".join(branch_md_list) if branch_md_list else "なし"
@@ -700,7 +700,7 @@ if submit_button:
                     "会社概要URL": official_url,
                     "社名判定": company_match,
                     "九州拠点": kyushu_text,
-                    "部署別IT提案": department_text,
+                    "部署別IT": department_text,
                     "特記事項": notes_text,
                     "_raw_keywords": department_keywords,
                     "_raw_notes": notes_text,
@@ -732,10 +732,10 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
     results = st.session_state["batch_results"]
 
     st.divider()
-    st.subheader("検索・分析結果一覧")
+    st.subheader("検索結果一覧")
 
     df_display = pd.DataFrame(results)
-    expected_columns = ["会社名", "会社概要URL", "社名判定", "九州拠点", "部署別IT提案", "特記事項"]
+    expected_columns = ["会社名", "会社概要URL", "社名判定", "九州拠点", "部署別IT", "特記事項"]
 
     for col in expected_columns:
         if col not in df_display.columns:
@@ -743,7 +743,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
 
     df_display = df_display[expected_columns]
 
-    md_table = "| 会社名 | 会社概要URL | 社名判定 | 九州拠点 | 部署別IT提案 | 特記事項 |\n"
+    md_table = "| 会社名 | 会社概要URL | 社名判定 | 九州拠点 | 部署別IT | 特記事項 |\n"
     md_table += "|---|---|---|---|---|---|\n"
     
     for row in results:
@@ -753,7 +753,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
         match_md = row.get("社名判定", "")
         
         kyushu_md = str(row.get("九州拠点", "")).replace("\n", "<br>")
-        it_prop_md = str(row.get("部署別IT提案", "")).replace("\n", "<br>")
+        it_prop_md = str(row.get("部署別IT", "")).replace("\n", "<br>")
         notes_md = str(row.get("特記事項", "")).replace("\n", "<br>")
         
         md_table += f"| {company_md} | {url_md} | {match_md} | {kyushu_md} | {it_prop_md} | {notes_md} |\n"
@@ -766,7 +766,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
     st.write("---")
     
     tsv_text = df_display.to_csv(sep="\t", index=False)
-    with st.expander("スプレッドシート用の一括コピー（タブ区切りテキスト）"):
+    with st.expander("コピー用"):
         st.code(tsv_text, language="text")
 
     csv_data = df_display.to_csv(index=False).encode("utf-8-sig")
@@ -800,13 +800,12 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
                 st.warning("社名判定: ⚠️確認できず")
 
             if row.get("九州拠点") and row["九州拠点"] != "なし":
-                # Markdownレンダリングを有効にするため st.markdown を使用
                 st.markdown(f"**九州拠点:** \n{row['九州拠点']}")
             else:
                 st.write("**九州拠点:** なし")
 
             if row.get("_raw_keywords"):
-                st.markdown("**部署別IT提案:**")
+                st.markdown("**部署別IT:**")
                 for item in row["_raw_keywords"]:
                     if not isinstance(item, dict):
                         continue
