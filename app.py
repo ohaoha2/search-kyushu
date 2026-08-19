@@ -51,8 +51,6 @@ LEGAL_FORMS = [
 def is_excluded_domain(domain: str):
   if not domain:
     return True
-  # ★マイナビやヤフーなど「自社検索される可能性があるドメイン」は外し、
-  # 純粋な第三者DBサイトやクチコミサイトのみを完全ブロック
   excluded_domains = [
       "wikipedia.org",
       "irbank.net",
@@ -60,20 +58,6 @@ def is_excluded_domain(domain: str):
       "houjin.jp",
       "xn--pckua2a7gp15o89zb.com",
       "baseconnect.in",
-      "metoree.com",
-      "doda.jp",
-      "rikunabi.com",
-      "salesnow.jp",
-      "syukatsu-kaigi.jp",
-      "jobtalk.jp",
-      "openwork.jp",
-      "en-hyouban.com",
-      "bizmaps.jp",
-      "atengineer.com",
-      "ipros.com",
-      "the-shashi.com",
-      "data-max.co.jp",
-      "tenshoku.mynavi.jp",  # マイナビ転職のサブドメインのみ除外
   ]
   return any(
       domain == excluded or domain.endswith("." + excluded)
@@ -340,8 +324,7 @@ def find_official_candidates(company: str, results: list):
 
 
 def search_company(company: str, api_key: str):
-  # ★ノイズの元だった「社名変更 IR」を外し、シンプルに公式サイトだけを狙う
-  q1 = f"{company} 会社概要 公式"
+  q1 = f"{company} 会社概要 公式 社名変更 IR"
   q1_results = fetch_serper_results(q1, api_key)
   official_candidates = find_official_candidates(company, q1_results)
 
@@ -353,9 +336,8 @@ def search_company(company: str, api_key: str):
   scraped_texts = []
 
   if best_domain:
-    q2_keywords = (
-        f'{best_domain} "拠点一覧" OR "事業所一覧" OR "営業所一覧" OR "国内拠点" OR "ネットワーク" OR "アクセス"'
-    )
+    # ★無料プラン回避: ORや""などの特殊な検索構文を外し、シンプルなスペース区切りにする
+    q2_keywords = f"{best_domain} 拠点一覧 支店 営業所 事業所 国内拠点 アクセス ネットワーク"
     raw_q2_results = fetch_serper_results(q2_keywords, api_key)
 
     best_main = extract_main_domain(best_domain)
@@ -436,7 +418,7 @@ def analyze_companies_batch(batch_data, gemini_key):
 【official_url】（会社概要の選定）
 ==================================================
 対象企業の「会社概要・企業情報ページ」のURLを記載してください。
-旧社名で入力された場合でも、検索結果にある現在の新社名のコーポレートサイト/会社概要/IRページのURL（例: idom-inc.com, lycorp.co.jp 等）を設定してください。
+旧社名で入力された場合でも、検索結果にある現在の新社名のコーポレートサイト/会社概要/IRページのURLを設定してください。
 【絶対ルール】：プレスリリース、ニュース記事、お知らせページ（/news/や/press/が含まれるもの）は絶対に選ばないでください。
 
 ==================================================
