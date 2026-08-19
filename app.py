@@ -375,9 +375,9 @@ def search_company(company: str, api_key: str):
   scraped_texts = []
 
   if best_domain:
-    # ★修正：法人格（株式会社等）を一切削らずに、入力された社名を完全にそのまま検索キーワードとして使用します
+    # ★大改良: 旧社名入力時でも新社名のドメイン内で拠点を探せるよう、ドメイン名を直接検索キーワードに指定
     q2_keywords = (
-        f"{company} 拠点一覧 支店一覧 営業所一覧 事業所 アクセス office 公式"
+        f"{best_domain} 拠点一覧 支店一覧 営業所一覧 国内拠点 事業所 アクセス ネットワーク"
     )
     raw_q2_results = fetch_serper_results(q2_keywords, api_key)
 
@@ -461,7 +461,7 @@ def analyze_companies_batch(batch_data, gemini_key):
 ==================================================
 対象企業の「会社概要・企業情報ページ」のURLを記載してください。
 旧社名で入力された場合でも、検索結果にある現在の新社名のコーポレートサイト/会社概要/IRページのURL（例: idom-inc.com, lycorp.co.jp 等）を設定してください。
-ニュース単体ページではなく、固定の会社概要・企業情報・沿革ページを最優先で選んでください。
+【絶対ルール】：プレスリリース、ニュース単体ページ、お知らせ記事などは「会社概要URL」として絶対に選ばないでください。必ず企業サイトのトップページや固定の会社概要ページ（/company/ や /profile/ など）を選んでください。
 
 ==================================================
 【拠点一覧】（拠点一覧ページのURL抽出）
@@ -469,6 +469,7 @@ def analyze_companies_batch(batch_data, gemini_key):
 検索結果の中から、対象法人の国内の拠点（支社、支店、営業所、工場など）が一覧で掲載されているページの「URL」を1つだけ抽出してください。
 【厳格ルール】
 - 会社概要（official_url）と同じドメインのURLを最優先で選んでください。
+- （例：/network/、/office/、/access/、/location/ などが含まれるURLを優先）
 - 該当する拠点一覧ページが見つからない場合や、別法人のページしかない場合は、空文字 "" を設定してください。
 - 複数の拠点ページが見つかった場合は、全国の拠点を網羅しているトップ階層の拠点一覧・アクセス情報のページを選んでください。
 
@@ -482,13 +483,11 @@ STEP 2: 【入力会社名】と【現在の最新の正式法人名】を比較
   → **絶対に「〇」** とだけ出力してください。
   ※入力が「〇〇」で正式名称が「株式会社〇〇」のように、法人格が抜けている場合や位置が異なる場合は完全一致とはみなしません。「〇」にしてはいけません。
 
-・【入力会社名】が『過去の旧社名』『グループ再編・統合・合併前の社名』である場合（例：ヤフー株式会社 → LINEヤフー株式会社、株式会社ガリバーインターナショナル → 株式会社IDOM、株式会社日立ハイテクノロジーズ → 株式会社日立ハイテク 等）：
+・【入力会社名】が『過去の旧社名』『グループ再編・統合・合併前の社名』である場合のみ：
   → テキスト全体を1つのMarkdownリンクにし、以下のフォーマットで出力してください。
-  フォーマット： [✕ [変更年月日（/区切り）]『現在の新社名』へ変更](社名変更の根拠URL)
-  （例： [✕ 2023/10/1『LINEヤフー株式会社』へ変更](https://www.lycorp.co.jp/...) ）
-  （例： [✕ 2016/7/15『株式会社IDOM』へ変更](https://idom-inc.com/ir/company/) ）
-  （例： [✕ 2020/4/1『株式会社日立ハイテク』へ変更](https://www.hitachi-hightech.com/...) ）
-  ※【リンクURLの指定】: Q1検索結果にある社名変更のお知らせ、沿革、プレスリリース、または新会社の会社概要を設定すること。
+  フォーマット： [✕ [変更年月日] 『現在の新社名』へ変更](社名変更の根拠URL)
+  （例： [✕ 2023年10月1日に 『LINEヤフー株式会社』へ変更](https://www.lycorp.co.jp/...) ）
+  ※【リンクURLの指定】: Q1検索結果にある社名変更のお知らせ、沿革、プレスリリース、または新会社の会社概要URLを設定すること。
   ※【装飾の禁止】: バッククォート（`）やアスタリスク（**）などの装飾記号は出力に一切入れないでください。純粋な `[テキスト](URL)` のみ。
 
 ・入力会社名が全く異なる別法人の場合 → 「✕ 不一致」
@@ -664,6 +663,7 @@ if submit_button:
         info_input = parse_legal_entity(company)
         input_core = info_input["core"] if info_input["core"] else norm_input
 
+        # ★【厳格版Python自動補正】入力社名が「現在の新社名」と法人格を含め完全一致する場合のみ「〇」へ補正する
         if not (company_match == "〇" or company_match.startswith("〇")):
           if "へ変更" in company_match or "に変更" in company_match:
             new_name_matches = re.findall(
@@ -681,6 +681,7 @@ if submit_button:
               if norm_input == extracted_new_name:
                 company_match = "〇"
 
+        # ★【自動救済】「⚠️確認できず」時にQ1結果から社名変更を自動検出して補完
         if "確認できず" in company_match:
           for r in fetched_item.get("q1_results", []):
             snip = r.get("snippet", "") + " " + r.get("title", "")
@@ -700,12 +701,10 @@ if submit_button:
                   )
                   date_str = f"{date_m.group(1)}に " if date_m else ""
                   company_match = f"[✕ {date_str}『{new_c}』へ変更]({url})"
-                  if not official_url or "gulliver-i.co.jp" in str(
-                      official_url
-                  ):
-                    official_url = url
+                  # ★修正ポイント: official_urlをニュースURLで上書きしていた処理を完全削除
                   break
 
+        # ★【Python側自動補正】拠点一覧URLのドメイン・別会社チェック
         branch_list_url = str(result.get("branch_list_url", "")).strip()
         if branch_list_url and branch_list_url.lower() != "null":
             if official_url:
