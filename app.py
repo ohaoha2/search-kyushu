@@ -367,18 +367,11 @@ def search_company(company: str, api_key: str):
     q2_keywords = f"{best_domain} 拠点一覧 支店 営業所 事業所 国内拠点 アクセス ネットワーク"
     raw_q2_results = fetch_serper_results(q2_keywords, api_key)
 
-    best_main = extract_main_domain(best_domain)
-
     for r in raw_q2_results:
       domain = extract_domain(r["url"])
-      if domain:
-        main_dom = extract_main_domain(domain)
-        if (
-            main_dom == best_main
-            or domain == best_domain
-            or domain.endswith("." + best_domain)
-        ):
-          q2_results.append(r)
+      # ★修正：サブドメイン違い（子会社サイト）を除外するため、ホスト名ドメイン完全一致でチェック
+      if domain and domain == best_domain:
+        q2_results.append(r)
 
     inferred_results = []
     added_urls = set([r["url"] for r in q2_results])
@@ -702,9 +695,10 @@ if submit_button:
                   )
                   date_str = f"{date_m.group(1)}に " if date_m else ""
                   company_match = f"[✕ {date_str}『{new_c}』へ変更]({url})"
+                  if not official_url:
+                    official_url = url
                   break
 
-        # ★【変更点】生のURLとしてデータを保持させる
         branch_list_url_raw = str(result.get("branch_list_url", "")).strip()
         branch_list_url = ""
         url_match = re.search(r'https?://[^\s)\]"\']+', branch_list_url_raw)
@@ -713,9 +707,10 @@ if submit_button:
             
         if branch_list_url and branch_list_url.lower() != "null":
             if official_url:
-                off_main = extract_main_domain(extract_domain(official_url))
-                br_main = extract_main_domain(extract_domain(branch_list_url))
-                if off_main and br_main and off_main != br_main:
+                # ★修正：サブドメインが異なる場合（子会社等）を厳格に排除するためホスト名ドメイン全体で比較
+                off_dom = extract_domain(official_url)
+                br_dom = extract_domain(branch_list_url)
+                if off_dom and br_dom and off_dom != br_dom:
                     branch_list_url = ""
 
         department_keywords = result.get("department_keywords", [])
@@ -797,11 +792,9 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
   for row in results:
     company_md = row.get("会社名", "").replace("\n", " ")
     
-    # ★【変更点】表のレンダリング時にHTMLの<a>タグを使って出力（スマホのタップ無反応問題を回避）
     url = row.get("会社概要URL")
     url_md = f'<a href="{url}" target="_blank">{url}</a>' if url else "確認できず"
     
-    # 社名判定のリンクも<a>タグに置換
     match_md = str(row.get("社名判定", ""))
     match_md = re.sub(r'\[(.*?)\]\((.*?)\)', r'<a href="\2" target="_blank">\1</a>', match_md)
 
@@ -846,7 +839,6 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
   for row in results:
     with st.expander(f"{row['会社名']} ── 【{row['社名判定']}】"):
 
-      # ★【変更点】カードの中もリンクではなくURLそのものを表示
       if row.get("会社概要URL"):
         st.markdown(
             f"**会社概要URL:** [{row['会社概要URL']}]({row['会社概要URL']})"
