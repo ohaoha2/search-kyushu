@@ -48,6 +48,22 @@ LEGAL_FORMS = [
 ]
 
 
+def is_subsidiary_or_different_entity(
+    branch_name: str, input_company: str
+) -> bool:
+  if not branch_name or not input_company:
+    return False
+
+  norm_branch = normalize_company_name(branch_name)
+  norm_company = normalize_company_name(input_company)
+
+  for form in LEGAL_FORMS:
+    if form in norm_branch:
+      if norm_company not in norm_branch:
+        return True
+  return False
+
+
 def is_excluded_domain(domain: str):
   if not domain:
     return True
@@ -359,13 +375,9 @@ def search_company(company: str, api_key: str):
   scraped_texts = []
 
   if best_domain:
-    info = parse_legal_entity(company)
-    core_name = info["core"] if info["core"] else company
-
-    clean_core = re.sub(r"(ホールディングス|HD)$", "", core_name)
-    # ★ 九州特化の検索キーワードから、「拠点一覧」の抽出に特化したキーワードへ変更
+    # ★修正：法人格（株式会社等）を一切削らずに、入力された社名を完全にそのまま検索キーワードとして使用します
     q2_keywords = (
-        f"{clean_core} 拠点一覧 支店一覧 営業所一覧 事業所 アクセス office 公式"
+        f"{company} 拠点一覧 支店一覧 営業所一覧 事業所 アクセス office 公式"
     )
     raw_q2_results = fetch_serper_results(q2_keywords, api_key)
 
@@ -452,7 +464,7 @@ def analyze_companies_batch(batch_data, gemini_key):
 ニュース単体ページではなく、固定の会社概要・企業情報・沿革ページを最優先で選んでください。
 
 ==================================================
-【拠点一覧】（拠点情報ページのURL抽出）
+【拠点一覧】（拠点一覧ページのURL抽出）
 ==================================================
 検索結果の中から、対象法人の国内の拠点（支社、支店、営業所、工場など）が一覧で掲載されているページの「URL」を1つだけ抽出してください。
 【厳格ルール】
@@ -463,18 +475,20 @@ def analyze_companies_batch(batch_data, gemini_key):
 ==================================================
 【company_match】（社名判定の厳格ルール）
 ==================================================
-1. 検索結果テキスト全体から対象企業の【現在の最新の正式法人名】を特定する。
-2. 【入力会社名】と【現在の最新の正式法人名】を比較する。
+STEP 1: 検索結果テキスト全体から対象企業の【現在の最新の正式法人名】を特定する。
+STEP 2: 【入力会社名】と【現在の最新の正式法人名】を比較する。
 
 ・【入力会社名】が【現在の最新の正式法人名】と「法人格（株式会社など）も含めて完全に一致」している場合のみ：
   → **絶対に「〇」** とだけ出力してください。
   ※入力が「〇〇」で正式名称が「株式会社〇〇」のように、法人格が抜けている場合や位置が異なる場合は完全一致とはみなしません。「〇」にしてはいけません。
 
-・【入力会社名】が『過去の旧社名』『グループ再編・統合・合併前の社名』である場合のみ：
+・【入力会社名】が『過去の旧社名』『グループ再編・統合・合併前の社名』である場合（例：ヤフー株式会社 → LINEヤフー株式会社、株式会社ガリバーインターナショナル → 株式会社IDOM、株式会社日立ハイテクノロジーズ → 株式会社日立ハイテク 等）：
   → テキスト全体を1つのMarkdownリンクにし、以下のフォーマットで出力してください。
-  フォーマット： [✕ [変更年月日] 『現在の新社名』へ変更](社名変更の根拠URL)
-  （例： [✕ 2023年10月1日に 『LINEヤフー株式会社』へ変更](https://www.lycorp.co.jp/...) ）
-  ※【リンクURLの指定】: Q1検索結果にある社名変更のお知らせ、沿革、プレスリリース、または新会社の会社概要URLを設定すること。
+  フォーマット： [✕ [変更年月日（/区切り）]『現在の新社名』へ変更](社名変更の根拠URL)
+  （例： [✕ 2023/10/1『LINEヤフー株式会社』へ変更](https://www.lycorp.co.jp/...) ）
+  （例： [✕ 2016/7/15『株式会社IDOM』へ変更](https://idom-inc.com/ir/company/) ）
+  （例： [✕ 2020/4/1『株式会社日立ハイテク』へ変更](https://www.hitachi-hightech.com/...) ）
+  ※【リンクURLの指定】: Q1検索結果にある社名変更のお知らせ、沿革、プレスリリース、または新会社の会社概要を設定すること。
   ※【装飾の禁止】: バッククォート（`）やアスタリスク（**）などの装飾記号は出力に一切入れないでください。純粋な `[テキスト](URL)` のみ。
 
 ・入力会社名が全く異なる別法人の場合 → 「✕ 不一致」
@@ -650,7 +664,6 @@ if submit_button:
         info_input = parse_legal_entity(company)
         input_core = info_input["core"] if info_input["core"] else norm_input
 
-        # ★【厳格版Python自動補正】入力社名が「現在の新社名」と法人格を含め完全一致する場合のみ「〇」へ補正する
         if not (company_match == "〇" or company_match.startswith("〇")):
           if "へ変更" in company_match or "に変更" in company_match:
             new_name_matches = re.findall(
@@ -665,11 +678,9 @@ if submit_button:
                   else extracted_new_name
               )
 
-              # 法人格を含めて完全一致（norm_input == extracted_new_name）する場合のみ「〇」にする
               if norm_input == extracted_new_name:
                 company_match = "〇"
 
-        # ★【自動救済】「⚠️確認できず」時にQ1結果から社名変更を自動検出して補完
         if "確認できず" in company_match:
           for r in fetched_item.get("q1_results", []):
             snip = r.get("snippet", "") + " " + r.get("title", "")
@@ -695,12 +706,18 @@ if submit_button:
                     official_url = url
                   break
 
-        # ★【新規】拠点一覧URLの処理
         branch_list_url = str(result.get("branch_list_url", "")).strip()
         if branch_list_url and branch_list_url.lower() != "null":
-          branch_list_md = f"[リンク]({branch_list_url})"
+            if official_url:
+                off_main = extract_main_domain(extract_domain(official_url))
+                br_main = extract_main_domain(extract_domain(branch_list_url))
+                if off_main and br_main and off_main != br_main:
+                    branch_list_url = ""
+                    
+        if branch_list_url:
+            branch_list_md = f"[リンク]({branch_list_url})"
         else:
-          branch_list_md = "なし"
+            branch_list_md = "なし"
 
         department_keywords = result.get("department_keywords", [])
         if not isinstance(department_keywords, list):
