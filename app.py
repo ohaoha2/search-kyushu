@@ -753,6 +753,11 @@ if submit_button:
             if off_dom and br_dom and off_dom != br_dom:
               branch_list_url = ""
 
+        # ★【ご指定機能の組み込み】会社概要URLと拠点一覧URLが同じ場合は「なし」にする
+        if branch_list_url and official_url:
+          if branch_list_url.rstrip("/") == official_url.rstrip("/"):
+            branch_list_url = ""
+
         department_keywords = result.get("department_keywords", [])
         if not isinstance(department_keywords, list):
           department_keywords = []
@@ -779,7 +784,6 @@ if submit_button:
 
         department_text = "\n\n".join(department_summary)
 
-        # ★【変更点】表示名として補足キーワードを除いた base_comp を使用
         final_row = {
             "会社名": base_comp,
             "会社概要URL": official_url,
