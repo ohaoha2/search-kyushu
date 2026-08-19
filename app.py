@@ -283,6 +283,12 @@ def score_official_candidate(company: str, result: dict, rank: int):
   if domain and re.match(r"^[a-z0-9]+-[a-z0-9]+\.", domain):
     score -= 40
 
+  # ★【新規フィルター】ニュースやプレスリリースのURLを会社概要に選ばせないための強力な減点
+  news_paths = ["/news", "/press", "/release", "news.html", "press.html", "/topics"]
+  for path in news_paths:
+    if path in url.lower():
+      score -= 50
+
   spam_domains = [
       "metoree.com",
       "doda.jp",
@@ -359,17 +365,13 @@ def search_company(company: str, api_key: str):
   scraped_texts = []
 
   if best_domain:
-    info = parse_legal_entity(company)
-    core_name = info["core"] if info["core"] else company
-
     q2_keywords = (
-        f"{core_name} 拠点一覧 支店一覧 営業所一覧 事業所 アクセス office 公式"
+        f"{best_domain} 拠点一覧 支店一覧 営業所一覧 国内拠点 事業所 アクセス ネットワーク"
     )
     raw_q2_results = fetch_serper_results(q2_keywords, api_key)
 
     best_main = extract_main_domain(best_domain)
 
-    # 公式候補と同じメインドメインの検索結果だけを厳格にフィルタリング
     for r in raw_q2_results:
       domain = extract_domain(r["url"])
       if domain:
@@ -381,7 +383,6 @@ def search_company(company: str, api_key: str):
         ):
           q2_results.append(r)
 
-    # 上位3件を直読み
     for r in q2_results[:3]:
       url = r["url"]
       if not url.lower().endswith(".pdf"):
@@ -439,7 +440,7 @@ def analyze_companies_batch(batch_data, gemini_key):
         f"【Q2ページ本文 直読みデータ（詳細情報）】\n{item.get('scraped_text', '取得失敗 または 該当ページなし')}\n"
     )
 
-  # プロンプトを極限までシンプル化（拠点文字抽出の廃止）
+  # 九州拠点抽出を廃止し、シンプルに拠点一覧URLのみに絞ったプロンプト
   prompt = f"""
 あなたは企業情報調査とDX営業提案の専門家です。
 提供された検索結果（およびページ直読みデータ）だけを使って判断してください。
@@ -449,7 +450,7 @@ def analyze_companies_batch(batch_data, gemini_key):
 ==================================================
 対象企業の「会社概要・企業情報ページ」のURLを記載してください。
 旧社名で入力された場合でも、検索結果にある現在の新社名のコーポレートサイト/会社概要/IRページのURL（例: idom-inc.com, lycorp.co.jp 等）を設定してください。
-ニュース単体ページではなく、固定の会社概要・企業情報・沿革ページを最優先で選んでください。
+【絶対ルール】：プレスリリース、ニュース記事、お知らせページ（/news/や/press/が含まれるもの）は「会社概要URL」として絶対に選ばないでください。固定の会社概要ページ（/company/ など）を優先してください。
 
 ==================================================
 【拠点一覧】（拠点一覧ページのURL抽出）
@@ -469,13 +470,14 @@ STEP 2: 【入力会社名】と【現在の最新の正式法人名】を比較
   ※入力が「〇〇」で正式名称が「株式会社〇〇」のように、法人格が抜けている場合や位置が異なる場合は完全一致とはみなしません。「〇」にしてはいけません。
 
 ・【入力会社名】が『過去の旧社名』『グループ再編・統合・合併前の社名』である場合のみ：
-  → テキスト全体を1つのMarkdownリンクにし、以下のフォーマットで出力してください。
-  フォーマット： [✕ [変更年月日] 『現在の新社名』へ変更](社名変更の根拠URL)
+  → 必ず以下のマークダウンリンク形式で出力してください。
+  フォーマット： [✕ 変更年月日 『現在の新社名』へ変更](社名変更の根拠URL)
   （例： [✕ 2023年10月1日 『LINEヤフー株式会社』へ変更](https://www.lycorp.co.jp/...) ）
-  ※【装飾の禁止】: バッククォート（`）やアスタリスク（**）などの装飾記号は出力に一切入れないでください。純粋な `[テキスト](URL)` のみ。
+  （例： [✕ 2016年7月15日 『株式会社IDOM』へ変更](https://idom-inc.com/ir/company/) ）
+  ※【リンクURLの指定】: Q1検索結果にある社名変更のお知らせ、沿革、プレスリリース、または新会社の会社概要URLを設定すること。
 
 ・入力会社名が全く異なる別法人の場合 → 「✕ 不一致」
-・正式法人名が確認できない場合 → 「⚠️確認できず」（検索結果に新社名への移行が明記されている場合は『✕ 新社名へ変更』とすること）
+・正式法人名が確認できない場合 → 「⚠️確認できず」（ただし検索結果に新社名への移行が明記されている場合は『✕ 新社名へ変更』とすること）
 
 ==================================================
 【部署別IT】
@@ -685,15 +687,25 @@ if submit_button:
                   )
                   date_str = f"{date_m.group(1)}に " if date_m else ""
                   company_match = f"[✕ {date_str}『{new_c}』へ変更]({url})"
+                  # ★修正：ここではofficial_urlは上書きしない（ニュース等で上書きされるのを防ぐ）
                   break
 
-        # ★【リンク破損防止処理】AIが返したURLを綺麗に抽出してリンク化する
+        # ★【拠点一覧URLの処理】
         branch_list_url_raw = str(result.get("branch_list_url", "")).strip()
-        
-        # URLらしい文字列だけを正規表現で抽出（AIがMarkdown形式で返してきても中身だけ抜く）
+        branch_list_url = ""
+        # マークダウン形式で返ってきた場合への対応策（URL部分だけを抽出）
         url_match = re.search(r'https?://[^\s)\]"\']+', branch_list_url_raw)
         if url_match:
             branch_list_url = url_match.group(0)
+            
+        if branch_list_url and branch_list_url.lower() != "null":
+            if official_url:
+                off_main = extract_main_domain(extract_domain(official_url))
+                br_main = extract_main_domain(extract_domain(branch_list_url))
+                if off_main and br_main and off_main != br_main:
+                    branch_list_url = ""
+                    
+        if branch_list_url:
             branch_list_md = f"[リンク]({branch_list_url})"
         else:
             branch_list_md = "なし"
@@ -731,6 +743,7 @@ if submit_button:
             "拠点一覧": branch_list_md,
             "部署別IT": department_text,
             "_raw_keywords": department_keywords,
+            "_branch_list_url": branch_list_url,
             "_q1_results": fetched_item.get("q1_results", []),
             "_q2_results": fetched_item.get("q2_results", []),
             "_official_candidates": fetched_item.get("official_candidates", []),
