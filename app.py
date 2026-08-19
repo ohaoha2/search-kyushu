@@ -308,7 +308,6 @@ def score_official_candidate(company: str, result: dict, rank: int):
     if path in url.lower():
       score -= 50
 
-  # ★【修正】マイナビ等の自社サイトを巻き添えにしないよう、求人サブドメインや純粋なDBサイトに限定
   spam_domains = [
       "metoree.com",
       "salesnow.jp",
@@ -734,6 +733,11 @@ if submit_button:
                   if not official_url:
                     official_url = url
                   break
+        
+        # ★【追加機能】スペースが除去されて「〇」になったことを明示する
+        raw_company_part = re.split(r'[\t、]+', company)[0].strip()
+        if company_match.startswith("〇") and base_comp != raw_company_part:
+            company_match = "〇（スペース除去済）"
 
         branch_list_url_raw = str(result.get("branch_list_url", "")).strip()
         branch_list_url = ""
