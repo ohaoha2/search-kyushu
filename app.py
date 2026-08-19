@@ -657,7 +657,6 @@ if submit_button:
           try:
             chunk, res_list = future.result()
             if isinstance(res_list, list):
-              # ★【強化】配列インデックス（順序）で完璧にデータを紐付ける
               for idx_in_chunk, item in enumerate(chunk):
                 res_item = next(
                     (r for r in res_list if r.get("index") == idx_in_chunk),
@@ -780,12 +779,14 @@ if submit_button:
 
         department_text = "\n\n".join(department_summary)
 
+        # ★【変更点】表示名として補足キーワードを除いた base_comp を使用
         final_row = {
-            "会社名": company,
+            "会社名": base_comp,
             "会社概要URL": official_url,
             "社名判定": company_match,
             "拠点一覧": branch_list_url if branch_list_url else "なし",
             "部署別IT": department_text,
+            "_company_input": company,
             "_raw_keywords": department_keywords,
             "_branch_list_url": branch_list_url,
             "_q1_results": fetched_item.get("q1_results", []),
@@ -804,7 +805,9 @@ if submit_button:
 
     ordered_results = []
     for comp in company_list:
-      row = next((r for r in final_results if r["会社名"] == comp), None)
+      row = next(
+          (r for r in final_results if r.get("_company_input") == comp), None
+      )
       if row:
         ordered_results.append(row)
 
