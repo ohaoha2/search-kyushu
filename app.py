@@ -33,6 +33,8 @@ LEGAL_FORMS = [
     "一般財団法人",
     "公益社団法人",
     "公益財団法人",
+    "社団法人",
+    "財団法人",
     "学校法人",
     "医療法人",
     "社会福祉法人",
@@ -49,24 +51,20 @@ LEGAL_FORMS = [
 
 
 def parse_input_company(raw_text: str):
-  """入力文字列を「社名本体」と「補足キーワード（地名や業種など）」に分離する汎用関数"""
-  text = raw_text.strip().split("\t")[0].strip()
-  parts = [p for p in re.split(r"[\s ]+", text) if p]
-  if not parts:
+  """入力文字列をタブ・読点で「社名本体」と「補足キーワード」に分離し、法人格前後のスペースのみを除去する"""
+  text = raw_text.strip()
+  if not text:
     return "", ""
 
-  if len(parts) >= 2:
-    if parts[0] in LEGAL_FORMS:
-      base_company = parts[0] + parts[1]
-      extra_keywords = " ".join(parts[2:])
-      return base_company, extra_keywords
-    elif parts[1] in LEGAL_FORMS:
-      base_company = parts[0] + parts[1]
-      extra_keywords = " ".join(parts[2:])
-      return base_company, extra_keywords
+  parts = re.split(r'[\t、]+', text)
+  raw_company = parts[0].strip()
+  extra_keywords = " ".join([p.strip() for p in parts[1:]]) if len(parts) > 1 else ""
 
-  base_company = parts[0]
-  extra_keywords = " ".join(parts[1:]) if len(parts) > 1 else ""
+  legal_forms_pattern = "|".join(map(re.escape, LEGAL_FORMS))
+  
+  base_company = re.sub(r'[\s ]+(' + legal_forms_pattern + ')', r'\1', raw_company)
+  base_company = re.sub(r'(' + legal_forms_pattern + ')[\s ]+', r'\1', base_company)
+
   return base_company, extra_keywords
 
 
@@ -310,30 +308,28 @@ def score_official_candidate(company: str, result: dict, rank: int):
     if path in url.lower():
       score -= 50
 
+  # ★【修正】マイナビ等の自社サイトを巻き添えにしないよう、求人サブドメインや純粋なDBサイトに限定
   spam_domains = [
       "metoree.com",
-      "doda.jp",
-      "mynavi.jp",
-      "rikunabi.com",
-      "en-japan.com",
       "salesnow.jp",
       "syukatsu-kaigi.jp",
       "jobtalk.jp",
       "openwork.jp",
       "en-hyouban.com",
-      "prtimes.jp",
-      "mapion.co.jp",
-      "navitime.co.jp",
       "bizmaps.jp",
-      "nikkei.com",
-      "yahoo.co.jp",
-      "toyokeizai.net",
       "atengineer.com",
       "ipros.com",
       "the-shashi.com",
-      "diamond.jp",
       "data-max.co.jp",
+      "job.mynavi.jp",
       "tenshoku.mynavi.jp",
+      "baito.mynavi.jp",
+      "job.rikunabi.com",
+      "next.rikunabi.com",
+      "employment.en-japan.com",
+      "type.jp",
+      "mapion.co.jp",
+      "navitime.co.jp",
   ]
   for spam in spam_domains:
     if domain and spam in domain:
@@ -510,7 +506,7 @@ STEP 2: 【判定用基本社名】と【現在の最新の正式法人名】を
 
 ・【判定用基本社名】が【現在の最新の正式法人名】と「法人格（株式会社など）も含めて完全に一致」している場合のみ：
   → **絶対に「〇」** とだけ出力してください。
-  ※ユーザー入力に地名や業種などの補足キーワード（例：「栃木」など）が含まれていても、【判定用基本社名】自体が完全一致していれば「〇」と判定してください。
+  ※ユーザー入力に地名や業種などの補足キーワードが含まれていても、【判定用基本社名】自体が完全一致していれば「〇」と判定してください。
   ※入力が「〇〇」で正式名称が「株式会社〇〇」のように、法人格が抜けている場合や位置が異なる場合は完全一致とはみなしません。「〇」にしてはいけません。
 
 ・【判定用基本社名】が『過去の旧社名』『グループ再編・統合・合併前の社名』である場合のみ：
@@ -567,8 +563,8 @@ STEP 2: 【判定用基本社名】と【現在の最新の正式法人名】を
 # ==========================================
 with st.form(key="batch_search_form"):
   raw_input = st.text_area(
-      "会社名リストを入力",
-      placeholder="株式会社○○○○\n株式会社△△△",
+      "会社名リストを入力（補足キーワードは読点「、」で区切ってください。法人格の前後のスペースは自動除去されます）",
+      placeholder="株式会社〇〇〇〇、栃木\n株式会社△△△\n\n※Excel等から複数列（会社名・キーワード）をコピー＆ペーストした場合も自動で認識します。",
       height=180,
   )
   submit_button = st.form_submit_button("検索", type="primary")
@@ -591,10 +587,9 @@ if submit_button:
     lines = raw_input.strip().split("\n")
     company_list = []
     for line in lines:
-      parts = line.split("\t")
-      company = parts[0].strip()
-      if company and company not in company_list:
-        company_list.append(company)
+      comp = line.strip()
+      if comp and comp not in company_list:
+        company_list.append(comp)
 
     companies_to_fetch = company_list
     final_results = []
@@ -753,7 +748,6 @@ if submit_button:
             if off_dom and br_dom and off_dom != br_dom:
               branch_list_url = ""
 
-        # ★【ご指定機能の組み込み】会社概要URLと拠点一覧URLが同じ場合は「なし」にする
         if branch_list_url and official_url:
           if branch_list_url.rstrip("/") == official_url.rstrip("/"):
             branch_list_url = ""
