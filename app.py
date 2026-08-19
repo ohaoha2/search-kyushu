@@ -51,6 +51,8 @@ LEGAL_FORMS = [
 def is_excluded_domain(domain: str):
   if not domain:
     return True
+  # ★マイナビやヤフーなど「自社検索される可能性があるドメイン」は外し、
+  # 純粋な第三者DBサイトやクチコミサイトのみを完全ブロック
   excluded_domains = [
       "wikipedia.org",
       "irbank.net",
@@ -58,6 +60,20 @@ def is_excluded_domain(domain: str):
       "houjin.jp",
       "xn--pckua2a7gp15o89zb.com",
       "baseconnect.in",
+      "metoree.com",
+      "doda.jp",
+      "rikunabi.com",
+      "salesnow.jp",
+      "syukatsu-kaigi.jp",
+      "jobtalk.jp",
+      "openwork.jp",
+      "en-hyouban.com",
+      "bizmaps.jp",
+      "atengineer.com",
+      "ipros.com",
+      "the-shashi.com",
+      "data-max.co.jp",
+      "tenshoku.mynavi.jp",  # マイナビ転職のサブドメインのみ除外
   ]
   return any(
       domain == excluded or domain.endswith("." + excluded)
@@ -283,40 +299,11 @@ def score_official_candidate(company: str, result: dict, rank: int):
   if domain and re.match(r"^[a-z0-9]+-[a-z0-9]+\.", domain):
     score -= 40
 
-  # ★【新規フィルター】ニュースやプレスリリースのURLを会社概要に選ばせないための強力な減点
   news_paths = ["/news", "/press", "/release", "news.html", "press.html", "/topics"]
   for path in news_paths:
     if path in url.lower():
       score -= 50
 
-  spam_domains = [
-      "metoree.com",
-      "doda.jp",
-      "mynavi.jp",
-      "rikunabi.com",
-      "en-japan.com",
-      "salesnow.jp",
-      "syukatsu-kaigi.jp",
-      "jobtalk.jp",
-      "openwork.jp",
-      "en-hyouban.com",
-      "prtimes.jp",
-      "mapion.co.jp",
-      "navitime.co.jp",
-      "bizmaps.jp",
-      "nikkei.com",
-      "yahoo.co.jp",
-      "toyokeizai.net",
-      "atengineer.com",
-      "ipros.com",
-      "the-shashi.com",
-      "diamond.jp",
-      "data-max.co.jp",
-      "tenshoku.mynavi.jp",
-  ]
-  for spam in spam_domains:
-    if domain and spam in domain:
-      score -= 100
   return score
 
 
@@ -353,7 +340,8 @@ def find_official_candidates(company: str, results: list):
 
 
 def search_company(company: str, api_key: str):
-  q1 = f"{company} 会社概要 公式 社名変更 IR"
+  # ★ノイズの元だった「社名変更 IR」を外し、シンプルに公式サイトだけを狙う
+  q1 = f"{company} 会社概要 公式"
   q1_results = fetch_serper_results(q1, api_key)
   official_candidates = find_official_candidates(company, q1_results)
 
@@ -366,7 +354,7 @@ def search_company(company: str, api_key: str):
 
   if best_domain:
     q2_keywords = (
-        f"{best_domain} 拠点一覧 支店一覧 営業所一覧 国内拠点 事業所 アクセス ネットワーク"
+        f'{best_domain} "拠点一覧" OR "事業所一覧" OR "営業所一覧" OR "国内拠点" OR "ネットワーク" OR "アクセス"'
     )
     raw_q2_results = fetch_serper_results(q2_keywords, api_key)
 
@@ -440,7 +428,6 @@ def analyze_companies_batch(batch_data, gemini_key):
         f"【Q2ページ本文 直読みデータ（詳細情報）】\n{item.get('scraped_text', '取得失敗 または 該当ページなし')}\n"
     )
 
-  # 九州拠点抽出を廃止し、シンプルに拠点一覧URLのみに絞ったプロンプト
   prompt = f"""
 あなたは企業情報調査とDX営業提案の専門家です。
 提供された検索結果（およびページ直読みデータ）だけを使って判断してください。
@@ -450,14 +437,16 @@ def analyze_companies_batch(batch_data, gemini_key):
 ==================================================
 対象企業の「会社概要・企業情報ページ」のURLを記載してください。
 旧社名で入力された場合でも、検索結果にある現在の新社名のコーポレートサイト/会社概要/IRページのURL（例: idom-inc.com, lycorp.co.jp 等）を設定してください。
-【絶対ルール】：プレスリリース、ニュース記事、お知らせページ（/news/や/press/が含まれるもの）は「会社概要URL」として絶対に選ばないでください。固定の会社概要ページ（/company/ など）を優先してください。
+【絶対ルール】：プレスリリース、ニュース記事、お知らせページ（/news/や/press/が含まれるもの）は絶対に選ばないでください。
 
 ==================================================
 【拠点一覧】（拠点一覧ページのURL抽出）
 ==================================================
 対象法人の国内の拠点（支社、支店、営業所、工場など）が一覧で掲載されているページの「URL」を1つだけ抽出してください。
 - 会社概要（official_url）と同じドメインのURLを最優先で選んでください。
-- 該当する拠点一覧ページが見つからない場合や、別法人のページしかない場合は、空文字 "" を設定してください。
+- 【絶対禁止ルール】「〇〇事業所」「〇〇工場」「〇〇支店」など、特定の1拠点だけを紹介している個別ページは【絶対に】選ばないでください。
+- 必ず「拠点一覧」「国内拠点」「ネットワーク」「事業所一覧」「アクセス」など、全国の拠点を網羅したトップ階層のページを選んでください。
+- 該当する一覧ページが見つからない場合は、空文字 "" を設定してください。
 
 ==================================================
 【company_match】（社名判定の厳格ルール）
@@ -473,7 +462,6 @@ STEP 2: 【入力会社名】と【現在の最新の正式法人名】を比較
   → 必ず以下のマークダウンリンク形式で出力してください。
   フォーマット： [✕ 変更年月日 『現在の新社名』へ変更](社名変更の根拠URL)
   （例： [✕ 2023年10月1日 『LINEヤフー株式会社』へ変更](https://www.lycorp.co.jp/...) ）
-  （例： [✕ 2016年7月15日 『株式会社IDOM』へ変更](https://idom-inc.com/ir/company/) ）
   ※【リンクURLの指定】: Q1検索結果にある社名変更のお知らせ、沿革、プレスリリース、または新会社の会社概要URLを設定すること。
 
 ・入力会社名が全く異なる別法人の場合 → 「✕ 不一致」
@@ -649,7 +637,6 @@ if submit_button:
         info_input = parse_legal_entity(company)
         input_core = info_input["core"] if info_input["core"] else norm_input
 
-        # ★【厳格版Python自動補正】入力社名が「現在の新社名」と法人格を含め完全一致する場合のみ「〇」へ補正する
         if not (company_match == "〇" or company_match.startswith("〇")):
           if "へ変更" in company_match or "に変更" in company_match:
             new_name_matches = re.findall(
@@ -667,7 +654,6 @@ if submit_button:
               if norm_input == extracted_new_name:
                 company_match = "〇"
 
-        # ★【自動救済】「⚠️確認できず」時にQ1結果から社名変更を自動検出して補完
         if "確認できず" in company_match:
           for r in fetched_item.get("q1_results", []):
             snip = r.get("snippet", "") + " " + r.get("title", "")
@@ -687,13 +673,10 @@ if submit_button:
                   )
                   date_str = f"{date_m.group(1)}に " if date_m else ""
                   company_match = f"[✕ {date_str}『{new_c}』へ変更]({url})"
-                  # ★修正：ここではofficial_urlは上書きしない（ニュース等で上書きされるのを防ぐ）
                   break
 
-        # ★【拠点一覧URLの処理】
         branch_list_url_raw = str(result.get("branch_list_url", "")).strip()
         branch_list_url = ""
-        # マークダウン形式で返ってきた場合への対応策（URL部分だけを抽出）
         url_match = re.search(r'https?://[^\s)\]"\']+', branch_list_url_raw)
         if url_match:
             branch_list_url = url_match.group(0)
