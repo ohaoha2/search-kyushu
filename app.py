@@ -288,6 +288,34 @@ def score_official_candidate(company: str, result: dict, rank: int):
     if path in url.lower():
       score -= 50
 
+  spam_domains = [
+      "metoree.com",
+      "doda.jp",
+      "mynavi.jp",
+      "rikunabi.com",
+      "en-japan.com",
+      "salesnow.jp",
+      "syukatsu-kaigi.jp",
+      "jobtalk.jp",
+      "openwork.jp",
+      "en-hyouban.com",
+      "prtimes.jp",
+      "mapion.co.jp",
+      "navitime.co.jp",
+      "bizmaps.jp",
+      "nikkei.com",
+      "yahoo.co.jp",
+      "toyokeizai.net",
+      "atengineer.com",
+      "ipros.com",
+      "the-shashi.com",
+      "diamond.jp",
+      "data-max.co.jp",
+      "tenshoku.mynavi.jp",
+  ]
+  for spam in spam_domains:
+    if domain and spam in domain:
+      score -= 100
   return score
 
 
@@ -324,7 +352,7 @@ def find_official_candidates(company: str, results: list):
 
 
 def search_company(company: str, api_key: str):
-  q1 = f"{company} 会社概要 公式 社名変更 IR"
+  q1 = f"{company} 会社概要 公式"
   q1_results = fetch_serper_results(q1, api_key)
   official_candidates = find_official_candidates(company, q1_results)
 
@@ -336,8 +364,9 @@ def search_company(company: str, api_key: str):
   scraped_texts = []
 
   if best_domain:
-    # ★無料プラン回避: ORや""などの特殊な検索構文を外し、シンプルなスペース区切りにする
-    q2_keywords = f"{best_domain} 拠点一覧 支店 営業所 事業所 国内拠点 アクセス ネットワーク"
+    q2_keywords = (
+        f"{best_domain} 拠点一覧 支店一覧 営業所一覧 国内拠点 事業所 アクセス ネットワーク"
+    )
     raw_q2_results = fetch_serper_results(q2_keywords, api_key)
 
     best_main = extract_main_domain(best_domain)
@@ -422,13 +451,13 @@ def analyze_companies_batch(batch_data, gemini_key):
 【絶対ルール】：プレスリリース、ニュース記事、お知らせページ（/news/や/press/が含まれるもの）は絶対に選ばないでください。
 
 ==================================================
-【拠点一覧】（拠点一覧ページのURL抽出）
+【拠点一覧】（拠点一覧ページのURL抽出と賢い推測）
 ==================================================
-対象法人の国内の拠点（支社、支店、営業所、工場など）が一覧で掲載されているページの「URL」を1つだけ抽出してください。
+対象法人の国内の拠点（支社、支店、営業所、工場など）やネットワークが一覧で掲載されているページの「URL」を1つだけ抽出してください。
 - 会社概要（official_url）と同じドメインのURLを最優先で選んでください。
-- 【絶対禁止ルール】「〇〇事業所」「〇〇工場」「〇〇支店」など、特定の1拠点だけを紹介している個別ページは【絶対に】選ばないでください。
-- 必ず「拠点一覧」「国内拠点」「ネットワーク」「事業所一覧」「アクセス」など、全国の拠点を網羅したトップ階層のページを選んでください。
-- 該当する一覧ページが見つからない場合は、空文字 "" を設定してください。
+- 特定の1拠点だけを紹介している個別ページ（例：「〇〇事業所」単体のページ）は避け、全国の拠点を網羅したトップ階層のページ（「拠点一覧」「国内拠点」「ネットワーク」「アクセス」など）を選んでください。
+- 【重要】検索結果にドンピシャのURLがなくても、検索結果のURLやスニペットから拠点一覧のトップURLが推測できる場合（例: 個別ページURLから親階層を推測するなど）は、賢くURLを調整・補完して出力してください。
+- どうしても推測すらできない場合のみ、空文字 "" を設定してください。
 
 ==================================================
 【company_match】（社名判定の厳格ルール）
@@ -443,8 +472,9 @@ STEP 2: 【入力会社名】と【現在の最新の正式法人名】を比較
 ・【入力会社名】が『過去の旧社名』『グループ再編・統合・合併前の社名』である場合のみ：
   → 必ず以下のマークダウンリンク形式で出力してください。
   フォーマット： [✕ 変更年月日 『現在の新社名』へ変更](社名変更の根拠URL)
-  （例： [✕ 2023年10月1日 『LINEヤフー株式会社』へ変更](https://www.lycorp.co.jp/...) ）
+  （例： [✕ 2023年4月1日 『新社名株式会社』へ変更](https://www.example.com/...) ）
   ※【リンクURLの指定】: Q1検索結果にある社名変更のお知らせ、沿革、プレスリリース、または新会社の会社概要URLを設定すること。
+  ※【装飾の禁止】: バッククォート（`）やアスタリスク（**）などの装飾記号は出力に一切入れないでください。純粋な `[テキスト](URL)` のみ。
 
 ・入力会社名が全く異なる別法人の場合 → 「✕ 不一致」
 ・正式法人名が確認できない場合 → 「⚠️確認できず」（ただし検索結果に新社名への移行が明記されている場合は『✕ 新社名へ変更』とすること）
@@ -636,6 +666,7 @@ if submit_button:
               if norm_input == extracted_new_name:
                 company_match = "〇"
 
+        # ★汎用的な自動救済（特定の企業名やドメインに依存しない）
         if "確認できず" in company_match:
           for r in fetched_item.get("q1_results", []):
             snip = r.get("snippet", "") + " " + r.get("title", "")
@@ -655,6 +686,8 @@ if submit_button:
                   )
                   date_str = f"{date_m.group(1)}に " if date_m else ""
                   company_match = f"[✕ {date_str}『{new_c}』へ変更]({url})"
+                  if not official_url:
+                    official_url = url
                   break
 
         branch_list_url_raw = str(result.get("branch_list_url", "")).strip()
