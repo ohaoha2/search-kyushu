@@ -55,7 +55,6 @@ def parse_input_company(raw_text: str):
   if not parts:
     return "", ""
 
-  # 法人格と社名がスペースで離れている場合（例: 「株式会社 コジマ 栃木」）の考慮
   if len(parts) >= 2:
     if parts[0] in LEGAL_FORMS:
       base_company = parts[0] + parts[1]
@@ -375,10 +374,8 @@ def find_official_candidates(company: str, results: list):
 
 
 def search_company(company_input: str, api_key: str):
-  # 入力を社名本体と補足キーワードに分離
   base_company, extra_keywords = parse_input_company(company_input)
 
-  # 検索時には補足キーワードも含めて精度を向上
   q1 = f"{base_company} {extra_keywords} 会社概要 公式".strip()
   q1_results = fetch_serper_results(q1, api_key)
   official_candidates = find_official_candidates(base_company, q1_results)
@@ -476,9 +473,9 @@ def analyze_companies_batch(batch_data, gemini_key):
     )
 
     prompt_targets += (
-        f"\n=== 対象企業 {i + 1} ===\n"
-        f"【入力テキスト】\n{item['company_input']}\n"
-        f"【判定用基本社名】\n{item['base_company']}\n\n"
+        f"\n=== 対象企業 index: {i} ===\n"
+        f"【判定用基本社名】\n{item['base_company']}\n"
+        f"【補足キーワード含む入力】\n{item['company_input']}\n\n"
         f"【公式サイト候補】\n{candidates_text}\n\n"
         f"【Q1検索結果（会社概要・社名変更用）】\n{q1_text if q1_text else 'なし'}\n\n"
         f"【Q2検索結果（拠点一覧ページ用）】\n{q2_text if q2_text else '公式サイト内に該当する拠点ページが見つかりませんでした'}\n\n"
@@ -513,6 +510,7 @@ STEP 2: 【判定用基本社名】と【現在の最新の正式法人名】を
 
 ・【判定用基本社名】が【現在の最新の正式法人名】と「法人格（株式会社など）も含めて完全に一致」している場合のみ：
   → **絶対に「〇」** とだけ出力してください。
+  ※ユーザー入力に地名や業種などの補足キーワード（例：「栃木」など）が含まれていても、【判定用基本社名】自体が完全一致していれば「〇」と判定してください。
   ※入力が「〇〇」で正式名称が「株式会社〇〇」のように、法人格が抜けている場合や位置が異なる場合は完全一致とはみなしません。「〇」にしてはいけません。
 
 ・【判定用基本社名】が『過去の旧社名』『グループ再編・統合・合併前の社名』である場合のみ：
@@ -536,7 +534,7 @@ STEP 2: 【判定用基本社名】と【現在の最新の正式法人名】を
 ==================================================
 [
   {{
-    "company_input": "入力テキスト",
+    "index": 0,
     "official_url": "https://.../company/profile/",
     "company_match": "〇",
     "branch_list_url": "https://.../company/office/",
@@ -609,8 +607,7 @@ if submit_button:
       fetched_data = []
 
       def fetch_wrapper(comp):
-        data = search_company(comp, serper_api_key)
-        return data
+        return search_company(comp, serper_api_key)
 
       with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = {
@@ -648,7 +645,8 @@ if submit_button:
       ]
 
       def gemini_wrapper(chunk):
-        return analyze_companies_batch(chunk, gemini_key)
+        res = analyze_companies_batch(chunk, gemini_key)
+        return chunk, res
 
       with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         futures = [
@@ -657,12 +655,19 @@ if submit_button:
         completed_chunks = 0
         for future in concurrent.futures.as_completed(futures):
           try:
-            res_list = future.result()
+            chunk, res_list = future.result()
             if isinstance(res_list, list):
-              for r in res_list:
-                comp_inp = r.get("company_input")
-                if comp_inp:
-                  company_map[comp_inp] = r
+              # ★【強化】配列インデックス（順序）で完璧にデータを紐付ける
+              for idx_in_chunk, item in enumerate(chunk):
+                res_item = next(
+                    (r for r in res_list if r.get("index") == idx_in_chunk),
+                    None,
+                )
+                if not res_item and idx_in_chunk < len(res_list):
+                  res_item = res_list[idx_in_chunk]
+
+                if res_item:
+                  company_map[item["company_input"]] = res_item
           except Exception as e:
             st.error(f"【AI分析エラー】: {str(e)}")
           completed_chunks += 1
