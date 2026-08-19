@@ -48,22 +48,6 @@ LEGAL_FORMS = [
 ]
 
 
-def is_subsidiary_or_different_entity(
-    branch_name: str, input_company: str
-) -> bool:
-  if not branch_name or not input_company:
-    return False
-
-  norm_branch = normalize_company_name(branch_name)
-  norm_company = normalize_company_name(input_company)
-
-  for form in LEGAL_FORMS:
-    if form in norm_branch:
-      if norm_company not in norm_branch:
-        return True
-  return False
-
-
 def is_excluded_domain(domain: str):
   if not domain:
     return True
@@ -375,14 +359,17 @@ def search_company(company: str, api_key: str):
   scraped_texts = []
 
   if best_domain:
-    # ★拠点一覧と九州拠点の両方をヒットさせるハイブリッド検索キーワード
+    info = parse_legal_entity(company)
+    core_name = info["core"] if info["core"] else company
+
     q2_keywords = (
-        f"{company} 拠点一覧 支店一覧 営業所一覧 九州 福岡 事業所 アクセス office 公式"
+        f"{core_name} 拠点一覧 支店一覧 営業所一覧 事業所 アクセス office 公式"
     )
     raw_q2_results = fetch_serper_results(q2_keywords, api_key)
 
     best_main = extract_main_domain(best_domain)
 
+    # 公式候補と同じメインドメインの検索結果だけを厳格にフィルタリング
     for r in raw_q2_results:
       domain = extract_domain(r["url"])
       if domain:
@@ -394,6 +381,7 @@ def search_company(company: str, api_key: str):
         ):
           q2_results.append(r)
 
+    # 上位3件を直読み
     for r in q2_results[:3]:
       url = r["url"]
       if not url.lower().endswith(".pdf"):
@@ -447,14 +435,14 @@ def analyze_companies_batch(batch_data, gemini_key):
         f"【入力会社名】\n{item['company']}\n\n"
         f"【公式サイト候補】\n{candidates_text}\n\n"
         f"【Q1検索結果（会社概要・社名変更用）】\n{q1_text if q1_text else 'なし'}\n\n"
-        f"【Q2検索結果（拠点ページ用）】\n{q2_text if q2_text else '公式サイト内に該当する拠点ページが見つかりませんでした'}\n\n"
+        f"【Q2検索結果（拠点一覧ページ用）】\n{q2_text if q2_text else '公式サイト内に該当する拠点ページが見つかりませんでした'}\n\n"
         f"【Q2ページ本文 直読みデータ（詳細情報）】\n{item.get('scraped_text', '取得失敗 または 該当ページなし')}\n"
     )
 
+  # プロンプトを極限までシンプル化（拠点文字抽出の廃止）
   prompt = f"""
 あなたは企業情報調査とDX営業提案の専門家です。
 提供された検索結果（およびページ直読みデータ）だけを使って判断してください。
-【重要】検索結果テキスト内に明記されていない事実・日付を推測や計算で算出して補完することは厳禁です。
 
 ==================================================
 【official_url】（会社概要の選定）
@@ -464,22 +452,11 @@ def analyze_companies_batch(batch_data, gemini_key):
 ニュース単体ページではなく、固定の会社概要・企業情報・沿革ページを最優先で選んでください。
 
 ==================================================
-【拠点一覧 URL】（全国の拠点一覧ページ）
+【拠点一覧】（拠点一覧ページのURL抽出）
 ==================================================
 対象法人の国内の拠点（支社、支店、営業所、工場など）が一覧で掲載されているページの「URL」を1つだけ抽出してください。
 - 会社概要（official_url）と同じドメインのURLを最優先で選んでください。
 - 該当する拠点一覧ページが見つからない場合や、別法人のページしかない場合は、空文字 "" を設定してください。
-
-==================================================
-【九州拠点】（九州エリアの拠点名抽出）
-==================================================
-提供されたデータの中から、対象法人が直接保有している「九州地方の拠点名（支社、支店、営業所、工場など）」を抽出し、情報が記載されていたページの「URL」もセットで出力してください。
-【厳格な禁止ルール】
-- 住所、ビル名、電話番号などは出力しないでください。「拠点名のみ」を抽出してください。
-- 拠点名がなく住所しか記載されていない場合は、推測せず空配列 [] を設定してください。
-- 【最重要：子会社・グループ会社の完全除外】
-  入力会社名と完全に一致する会社名の拠点のみを抽出してください。情報元のページタイトルや文章に、入力会社名とは少しでも異なる社名（例：入力が『株式会社〇〇』なのに、タイトルが『株式会社〇〇ソリューションズ』など）が記載されている場合、そのページは別法人のページです。これら別会社のページに載っている拠点は【絶対に1つも抽出せず、完全に無視】してください。
-- テキストに存在しない拠点を勝手に作り出すこと（ハルシネーション）は厳禁です。
 
 ==================================================
 【company_match】（社名判定の厳格ルール）
@@ -493,13 +470,12 @@ STEP 2: 【入力会社名】と【現在の最新の正式法人名】を比較
 
 ・【入力会社名】が『過去の旧社名』『グループ再編・統合・合併前の社名』である場合のみ：
   → テキスト全体を1つのMarkdownリンクにし、以下のフォーマットで出力してください。
-  フォーマット： [✕ [変更年月日]『現在の新社名』へ変更](社名変更の根拠URL)
-  （例： [✕ 2023年10月1日『LINEヤフー株式会社』へ変更](https://www.lycorp.co.jp/...) ）
-  ※【リンクURLの指定】: Q1検索結果にある社名変更のお知らせ、沿革、プレスリリース、または新会社の会社概要を設定すること。
+  フォーマット： [✕ [変更年月日] 『現在の新社名』へ変更](社名変更の根拠URL)
+  （例： [✕ 2023年10月1日 『LINEヤフー株式会社』へ変更](https://www.lycorp.co.jp/...) ）
   ※【装飾の禁止】: バッククォート（`）やアスタリスク（**）などの装飾記号は出力に一切入れないでください。純粋な `[テキスト](URL)` のみ。
 
 ・入力会社名が全く異なる別法人の場合 → 「✕ 不一致」
-・正式法人名が確認できない場合 → 「⚠️確認できず」（ただし検索結果に新社名への移行が明記されている場合は『✕ 新社名へ変更』とすること）
+・正式法人名が確認できない場合 → 「⚠️確認できず」（検索結果に新社名への移行が明記されている場合は『✕ 新社名へ変更』とすること）
 
 ==================================================
 【部署別IT】
@@ -517,12 +493,6 @@ STEP 2: 【入力会社名】と【現在の最新の正式法人名】を比較
     "official_url": "https://.../company/profile/",
     "company_match": "〇",
     "branch_list_url": "https://.../company/office/",
-    "kyushu_branches": [
-      {{
-        "name": "九州支社",
-        "url": "https://..."
-      }}
-    ],
     "department_keywords": [
       {{
         "department": "営業部",
@@ -717,56 +687,16 @@ if submit_button:
                   company_match = f"[✕ {date_str}『{new_c}』へ変更]({url})"
                   break
 
-        #拠点一覧URLの処理
-        branch_list_url = str(result.get("branch_list_url", "")).strip()
-        if branch_list_url and branch_list_url.lower() != "null":
-            if official_url:
-                off_main = extract_main_domain(extract_domain(official_url))
-                br_main = extract_main_domain(extract_domain(branch_list_url))
-                if off_main and br_main and off_main != br_main:
-                    branch_list_url = ""
-                    
-        if branch_list_url:
+        # ★【リンク破損防止処理】AIが返したURLを綺麗に抽出してリンク化する
+        branch_list_url_raw = str(result.get("branch_list_url", "")).strip()
+        
+        # URLらしい文字列だけを正規表現で抽出（AIがMarkdown形式で返してきても中身だけ抜く）
+        url_match = re.search(r'https?://[^\s)\]"\']+', branch_list_url_raw)
+        if url_match:
+            branch_list_url = url_match.group(0)
             branch_list_md = f"[リンク]({branch_list_url})"
         else:
             branch_list_md = "なし"
-
-        # 九州拠点の処理
-        kyushu_branches = result.get("kyushu_branches", [])
-        if not isinstance(kyushu_branches, list):
-          kyushu_branches = []
-
-        branch_md_list = []
-        for b in kyushu_branches:
-          b_name = ""
-          b_url = ""
-          if isinstance(b, dict):
-            b_name = b.get("name", "").strip()
-            b_url = b.get("url", "").strip()
-          elif isinstance(b, str):
-            b_name = b.strip()
-
-          if not b_name:
-            continue
-
-          # ★【Python側自動フィルタ】子会社・別法人拠点を強制除外
-          if is_subsidiary_or_different_entity(b_name, company):
-            continue
-
-          # 九州拠点URLのドメインチェック（親ドメインと違う場合はリンクを貼らない）
-          if b_url and b_url.lower() != "null":
-              if official_url:
-                  off_main = extract_main_domain(extract_domain(official_url))
-                  br_url_main = extract_main_domain(extract_domain(b_url))
-                  if off_main and br_url_main and off_main != br_url_main:
-                      b_url = ""
-          
-          if b_url and b_url.lower() != "null" and b_url != "":
-            branch_md_list.append(f"[{b_name}]({b_url})")
-          else:
-            branch_md_list.append(b_name)
-
-        kyushu_text = "\n".join(branch_md_list) if branch_md_list else "なし"
 
         department_keywords = result.get("department_keywords", [])
         if not isinstance(department_keywords, list):
@@ -796,13 +726,11 @@ if submit_button:
 
         final_row = {
             "会社名": company,
-            "会社概要": official_url,
+            "会社概要URL": official_url,
             "社名判定": company_match,
             "拠点一覧": branch_list_md,
-            "九州拠点": kyushu_text,
             "部署別IT": department_text,
             "_raw_keywords": department_keywords,
-            "_branch_list_url": branch_list_url,
             "_q1_results": fetched_item.get("q1_results", []),
             "_q2_results": fetched_item.get("q2_results", []),
             "_official_candidates": fetched_item.get("official_candidates", []),
@@ -834,7 +762,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
   st.subheader("検索結果一覧")
 
   df_display = pd.DataFrame(results)
-  expected_columns = ["会社名", "会社概要", "社名判定", "拠点一覧", "九州拠点", "部署別IT"]
+  expected_columns = ["会社名", "会社概要URL", "社名判定", "拠点一覧", "部署別IT"]
 
   for col in expected_columns:
     if col not in df_display.columns:
@@ -842,21 +770,20 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
 
   df_display = df_display[expected_columns]
 
-  md_table = "| 会社名 | 会社概要 | 社名判定 | 拠点一覧 | 九州拠点 | 部署別IT |\n"
-  md_table += "|---|---|---|---|---|---|\n"
+  md_table = "| 会社名 | 会社概要URL | 社名判定 | 拠点一覧 | 部署別IT |\n"
+  md_table += "|---|---|---|---|---|\n"
 
   for row in results:
     company_md = row.get("会社名", "").replace("\n", " ")
-    url = row.get("会社概要")
+    url = row.get("会社概要URL")
     url_md = f"[リンク]({url})" if url else "確認できず"
     match_md = row.get("社名判定", "")
 
-    branch_list_md = str(row.get("拠点一覧", "")).replace("\n", "<br>")
-    kyushu_md = str(row.get("九州拠点", "")).replace("\n", "<br>")
+    branch_md = str(row.get("拠点一覧", "")).replace("\n", "<br>")
     it_prop_md = str(row.get("部署別IT", "")).replace("\n", "<br>")
 
     md_table += (
-        f"| {company_md} | {url_md} | {match_md} | {branch_list_md} | {kyushu_md} |"
+        f"| {company_md} | {url_md} | {match_md} | {branch_md} |"
         f" {it_prop_md} |\n"
     )
 
@@ -888,12 +815,12 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
   for row in results:
     with st.expander(f"{row['会社名']} ── 【{row['社名判定']}】"):
 
-      if row.get("会社概要"):
+      if row.get("会社概要URL"):
         st.markdown(
-            f"**会社概要:** [{row['会社概要']}]({row['会社概要']})"
+            f"**会社概要URL:** [{row['会社概要URL']}]({row['会社概要URL']})"
         )
       else:
-        st.write("**会社概要:** 確認できず")
+        st.write("**会社概要URL:** 確認できず")
 
       match_str = str(row["社名判定"])
       if match_str == "〇" or match_str.startswith("〇"):
@@ -907,11 +834,6 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
         st.markdown(f"**拠点一覧:** {row['拠点一覧']}")
       else:
         st.write("**拠点一覧:** なし")
-
-      if row.get("九州拠点") and row["九州拠点"] != "なし":
-        st.markdown(f"**九州拠点:** \n{row['九州拠点']}")
-      else:
-        st.write("**九州拠点:** なし")
 
       if row.get("_raw_keywords"):
         st.markdown("**部署別IT:**")
