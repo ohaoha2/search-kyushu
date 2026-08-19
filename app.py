@@ -48,6 +48,29 @@ LEGAL_FORMS = [
 ]
 
 
+def parse_input_company(raw_text: str):
+  """入力文字列を「社名本体」と「補足キーワード（地名や業種など）」に分離する汎用関数"""
+  text = raw_text.strip().split("\t")[0].strip()
+  parts = [p for p in re.split(r"[\s ]+", text) if p]
+  if not parts:
+    return "", ""
+
+  # 法人格と社名がスペースで離れている場合（例: 「株式会社 コジマ 栃木」）の考慮
+  if len(parts) >= 2:
+    if parts[0] in LEGAL_FORMS:
+      base_company = parts[0] + parts[1]
+      extra_keywords = " ".join(parts[2:])
+      return base_company, extra_keywords
+    elif parts[1] in LEGAL_FORMS:
+      base_company = parts[0] + parts[1]
+      extra_keywords = " ".join(parts[2:])
+      return base_company, extra_keywords
+
+  base_company = parts[0]
+  extra_keywords = " ".join(parts[1:]) if len(parts) > 1 else ""
+  return base_company, extra_keywords
+
+
 def is_excluded_domain(domain: str):
   if not domain:
     return True
@@ -351,10 +374,14 @@ def find_official_candidates(company: str, results: list):
   return unique_candidates[:10]
 
 
-def search_company(company: str, api_key: str):
-  q1 = f"{company} 会社概要 公式"
+def search_company(company_input: str, api_key: str):
+  # 入力を社名本体と補足キーワードに分離
+  base_company, extra_keywords = parse_input_company(company_input)
+
+  # 検索時には補足キーワードも含めて精度を向上
+  q1 = f"{base_company} {extra_keywords} 会社概要 公式".strip()
   q1_results = fetch_serper_results(q1, api_key)
-  official_candidates = find_official_candidates(company, q1_results)
+  official_candidates = find_official_candidates(base_company, q1_results)
 
   best_domain = None
   if official_candidates:
@@ -369,7 +396,6 @@ def search_company(company: str, api_key: str):
 
     for r in raw_q2_results:
       domain = extract_domain(r["url"])
-      # ★修正：サブドメイン違い（子会社サイト）を除外するため、ホスト名ドメイン完全一致でチェック
       if domain and domain == best_domain:
         q2_results.append(r)
 
@@ -379,8 +405,12 @@ def search_company(company: str, api_key: str):
       url = r["url"]
       parsed = urlparse(url)
       path = parsed.path
-      
-      m = re.search(r'^(.*?/(?:network|office|offices|location|locations|access|base|branch|kyoten)[/])', path, re.IGNORECASE)
+
+      m = re.search(
+          r"^(.*?/(?:network|office|offices|location|locations|access|base|branch|kyoten)[/])",
+          path,
+          re.IGNORECASE,
+      )
       if m:
         inferred_url = f"{parsed.scheme}://{parsed.netloc}{m.group(1)}"
         if inferred_url not in added_urls and inferred_url != url:
@@ -388,9 +418,11 @@ def search_company(company: str, api_key: str):
           inferred_results.append({
               "title": "【拠点一覧トップページ候補】",
               "url": inferred_url,
-              "snippet": "システムがURL階層から自動推測した拠点・事業所一覧のトップページです。ここを最優先で選んでください。"
+              "snippet": (
+                  "システムがURL階層から自動推測した拠点・事業所一覧のトップページです。ここを最優先で選んでください。"
+              ),
           })
-          
+
     q2_results = inferred_results + q2_results
 
     for r in q2_results[:3]:
@@ -403,6 +435,8 @@ def search_company(company: str, api_key: str):
           )
 
   return {
+      "company_input": company_input,
+      "base_company": base_company,
       "q1_results": q1_results,
       "q2_results": q2_results,
       "official_candidates": official_candidates,
@@ -443,7 +477,8 @@ def analyze_companies_batch(batch_data, gemini_key):
 
     prompt_targets += (
         f"\n=== 対象企業 {i + 1} ===\n"
-        f"【入力会社名】\n{item['company']}\n\n"
+        f"【入力テキスト】\n{item['company_input']}\n"
+        f"【判定用基本社名】\n{item['base_company']}\n\n"
         f"【公式サイト候補】\n{candidates_text}\n\n"
         f"【Q1検索結果（会社概要・社名変更用）】\n{q1_text if q1_text else 'なし'}\n\n"
         f"【Q2検索結果（拠点一覧ページ用）】\n{q2_text if q2_text else '公式サイト内に該当する拠点ページが見つかりませんでした'}\n\n"
@@ -474,13 +509,13 @@ def analyze_companies_batch(batch_data, gemini_key):
 【company_match】（社名判定の厳格ルール）
 ==================================================
 STEP 1: 検索結果テキスト全体から対象企業の【現在の最新の正式法人名】を特定する。
-STEP 2: 【入力会社名】と【現在の最新の正式法人名】を比較する。
+STEP 2: 【判定用基本社名】と【現在の最新の正式法人名】を比較する。
 
-・【入力会社名】が【現在の最新の正式法人名】と「法人格（株式会社など）も含めて完全に一致」している場合のみ：
+・【判定用基本社名】が【現在の最新の正式法人名】と「法人格（株式会社など）も含めて完全に一致」している場合のみ：
   → **絶対に「〇」** とだけ出力してください。
   ※入力が「〇〇」で正式名称が「株式会社〇〇」のように、法人格が抜けている場合や位置が異なる場合は完全一致とはみなしません。「〇」にしてはいけません。
 
-・【入力会社名】が『過去の旧社名』『グループ再編・統合・合併前の社名』である場合のみ：
+・【判定用基本社名】が『過去の旧社名』『グループ再編・統合・合併前の社名』である場合のみ：
   → 必ず以下のマークダウンリンク形式で出力してください。
   フォーマット： [✕ 変更年月日 『現在の新社名』へ変更](社名変更の根拠URL)
   ※【リンクURLの指定】: Q1検索結果にある社名変更のお知らせ、沿革、プレスリリース、または新会社の会社概要URLを設定すること。
@@ -501,7 +536,7 @@ STEP 2: 【入力会社名】と【現在の最新の正式法人名】を比較
 ==================================================
 [
   {{
-    "company": "入力会社名",
+    "company_input": "入力テキスト",
     "official_url": "https://.../company/profile/",
     "company_match": "〇",
     "branch_list_url": "https://.../company/office/",
@@ -575,7 +610,7 @@ if submit_button:
 
       def fetch_wrapper(comp):
         data = search_company(comp, serper_api_key)
-        return {"company": comp, **data}
+        return data
 
       with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = {
@@ -592,8 +627,10 @@ if submit_button:
                 f"【検索失敗】 {comp_name}のデータ取得中にエラーが発生しました:"
                 f" {str(e)}"
             )
+            base_c, _ = parse_input_company(comp_name)
             fetched_data.append({
-                "company": comp_name,
+                "company_input": comp_name,
+                "base_company": base_c,
                 "q1_results": [],
                 "q2_results": [],
                 "official_candidates": [],
@@ -623,9 +660,9 @@ if submit_button:
             res_list = future.result()
             if isinstance(res_list, list):
               for r in res_list:
-                comp = r.get("company")
-                if comp:
-                  company_map[comp] = r
+                comp_inp = r.get("company_input")
+                if comp_inp:
+                  company_map[comp_inp] = r
           except Exception as e:
             st.error(f"【AI分析エラー】: {str(e)}")
           completed_chunks += 1
@@ -634,10 +671,18 @@ if submit_button:
       status.text("結果を整形中...")
       for company in companies_to_fetch:
         fetched_item = next(
-            (item for item in fetched_data if item["company"] == company), None
+            (
+                item
+                for item in fetched_data
+                if item["company_input"] == company
+            ),
+            None,
         )
         if fetched_item is None:
+          base_c, _ = parse_input_company(company)
           fetched_item = {
+              "company_input": company,
+              "base_company": base_c,
               "q1_results": [],
               "q2_results": [],
               "official_candidates": [],
@@ -655,9 +700,8 @@ if submit_button:
             company_match.replace("**", "").replace("`", "").strip()
         )
 
-        norm_input = normalize_company_name(company)
-        info_input = parse_legal_entity(company)
-        input_core = info_input["core"] if info_input["core"] else norm_input
+        base_comp = fetched_item["base_company"]
+        norm_input = normalize_company_name(base_comp)
 
         if not (company_match == "〇" or company_match.startswith("〇")):
           if "へ変更" in company_match or "に変更" in company_match:
@@ -666,13 +710,6 @@ if submit_button:
             )
             if new_name_matches:
               extracted_new_name = normalize_company_name(new_name_matches[-1])
-              info_extracted = parse_legal_entity(extracted_new_name)
-              extracted_core = (
-                  info_extracted["core"]
-                  if info_extracted["core"]
-                  else extracted_new_name
-              )
-
               if norm_input == extracted_new_name:
                 company_match = "〇"
 
@@ -688,7 +725,7 @@ if submit_button:
                 new_c = (
                     m.group(1).replace("『", "").replace("』", "").strip()
                 )
-                if new_c and new_c != company:
+                if new_c and new_c != base_comp:
                   url = r.get("url", "")
                   date_m = re.search(
                       r"(\d{4}年\d{1,2}月(?:\d{1,2}日)?)", snip
@@ -703,15 +740,14 @@ if submit_button:
         branch_list_url = ""
         url_match = re.search(r'https?://[^\s)\]"\']+', branch_list_url_raw)
         if url_match:
-            branch_list_url = url_match.group(0)
-            
+          branch_list_url = url_match.group(0)
+
         if branch_list_url and branch_list_url.lower() != "null":
-            if official_url:
-                # ★修正：サブドメインが異なる場合（子会社等）を厳格に排除するためホスト名ドメイン全体で比較
-                off_dom = extract_domain(official_url)
-                br_dom = extract_domain(branch_list_url)
-                if off_dom and br_dom and off_dom != br_dom:
-                    branch_list_url = ""
+          if official_url:
+            off_dom = extract_domain(official_url)
+            br_dom = extract_domain(branch_list_url)
+            if off_dom and br_dom and off_dom != br_dom:
+              branch_list_url = ""
 
         department_keywords = result.get("department_keywords", [])
         if not isinstance(department_keywords, list):
@@ -749,7 +785,9 @@ if submit_button:
             "_branch_list_url": branch_list_url,
             "_q1_results": fetched_item.get("q1_results", []),
             "_q2_results": fetched_item.get("q2_results", []),
-            "_official_candidates": fetched_item.get("official_candidates", []),
+            "_official_candidates": fetched_item.get(
+                "official_candidates", []
+            ),
             "_scraped_text": fetched_item.get("scraped_text", ""),
         }
 
@@ -791,18 +829,20 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
 
   for row in results:
     company_md = row.get("会社名", "").replace("\n", " ")
-    
+
     url = row.get("会社概要URL")
     url_md = f'<a href="{url}" target="_blank">{url}</a>' if url else "確認できず"
-    
+
     match_md = str(row.get("社名判定", ""))
-    match_md = re.sub(r'\[(.*?)\]\((.*?)\)', r'<a href="\2" target="_blank">\1</a>', match_md)
+    match_md = re.sub(
+        r"\[(.*?)\]\((.*?)\)", r'<a href="\2" target="_blank">\1</a>', match_md
+    )
 
     branch_val = str(row.get("拠点一覧", ""))
     if branch_val.startswith("http"):
-        branch_md = f'<a href="{branch_val}" target="_blank">{branch_val}</a>'
+      branch_md = f'<a href="{branch_val}" target="_blank">{branch_val}</a>'
     else:
-        branch_md = branch_val
+      branch_md = branch_val
 
     it_prop_md = str(row.get("部署別IT", "")).replace("\n", "<br>")
 
@@ -849,7 +889,12 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
       match_str = str(row["社名判定"])
       if match_str == "〇" or match_str.startswith("〇"):
         st.success(f"社名判定: {match_str}")
-      elif match_str.startswith("✕") or "✕" in match_str or "<a" in match_str or "[" in match_str:
+      elif (
+          match_str.startswith("✕")
+          or "✕" in match_str
+          or "<a" in match_str
+          or "[" in match_str
+      ):
         st.error(f"社名判定: {match_str}")
       else:
         st.warning(f"社名判定: {match_str}")
