@@ -364,9 +364,7 @@ def search_company(company: str, api_key: str):
   scraped_texts = []
 
   if best_domain:
-    q2_keywords = (
-        f"{best_domain} 拠点一覧 支店一覧 営業所一覧 国内拠点 事業所 アクセス ネットワーク"
-    )
+    q2_keywords = f"{best_domain} 拠点一覧 支店 営業所 事業所 国内拠点 アクセス ネットワーク"
     raw_q2_results = fetch_serper_results(q2_keywords, api_key)
 
     best_main = extract_main_domain(best_domain)
@@ -381,6 +379,26 @@ def search_company(company: str, api_key: str):
             or domain.endswith("." + best_domain)
         ):
           q2_results.append(r)
+
+    inferred_results = []
+    added_urls = set([r["url"] for r in q2_results])
+    for r in q2_results:
+      url = r["url"]
+      parsed = urlparse(url)
+      path = parsed.path
+      
+      m = re.search(r'^(.*?/(?:network|office|offices|location|locations|access|base|branch|kyoten)[/])', path, re.IGNORECASE)
+      if m:
+        inferred_url = f"{parsed.scheme}://{parsed.netloc}{m.group(1)}"
+        if inferred_url not in added_urls and inferred_url != url:
+          added_urls.add(inferred_url)
+          inferred_results.append({
+              "title": "【拠点一覧トップページ候補】",
+              "url": inferred_url,
+              "snippet": "システムがURL階層から自動推測した拠点・事業所一覧のトップページです。ここを最優先で選んでください。"
+          })
+          
+    q2_results = inferred_results + q2_results
 
     for r in q2_results[:3]:
       url = r["url"]
@@ -455,9 +473,9 @@ def analyze_companies_batch(batch_data, gemini_key):
 ==================================================
 対象法人の国内の拠点（支社、支店、営業所、工場など）やネットワークが一覧で掲載されているページの「URL」を1つだけ抽出してください。
 - 会社概要（official_url）と同じドメインのURLを最優先で選んでください。
-- 特定の1拠点だけを紹介している個別ページ（例：「〇〇事業所」単体のページ）は避け、全国の拠点を網羅したトップ階層のページ（「拠点一覧」「国内拠点」「ネットワーク」「アクセス」など）を選んでください。
-- 【重要】検索結果にドンピシャのURLがなくても、検索結果のURLやスニペットから拠点一覧のトップURLが推測できる場合（例: 個別ページURLから親階層を推測するなど）は、賢くURLを調整・補完して出力してください。
-- どうしても推測すらできない場合のみ、空文字 "" を設定してください。
+- Q2検索結果の中に「【拠点一覧トップページ候補】」というタイトルのURLがある場合は、それが全国の拠点を網羅したトップ階層である可能性が高いため、最優先で選択してください。
+- 特定の1拠点だけを紹介している個別ページ（例：「〇〇事業所」単体のページ）は絶対に選ばないでください。
+- 該当する一覧ページが見つからない場合は、空文字 "" を設定してください。
 
 ==================================================
 【company_match】（社名判定の厳格ルール）
@@ -472,7 +490,6 @@ STEP 2: 【入力会社名】と【現在の最新の正式法人名】を比較
 ・【入力会社名】が『過去の旧社名』『グループ再編・統合・合併前の社名』である場合のみ：
   → 必ず以下のマークダウンリンク形式で出力してください。
   フォーマット： [✕ 変更年月日 『現在の新社名』へ変更](社名変更の根拠URL)
-  （例： [✕ 2023年4月1日 『新社名株式会社』へ変更](https://www.example.com/...) ）
   ※【リンクURLの指定】: Q1検索結果にある社名変更のお知らせ、沿革、プレスリリース、または新会社の会社概要URLを設定すること。
   ※【装飾の禁止】: バッククォート（`）やアスタリスク（**）などの装飾記号は出力に一切入れないでください。純粋な `[テキスト](URL)` のみ。
 
@@ -666,7 +683,6 @@ if submit_button:
               if norm_input == extracted_new_name:
                 company_match = "〇"
 
-        # ★汎用的な自動救済（特定の企業名やドメインに依存しない）
         if "確認できず" in company_match:
           for r in fetched_item.get("q1_results", []):
             snip = r.get("snippet", "") + " " + r.get("title", "")
@@ -686,10 +702,9 @@ if submit_button:
                   )
                   date_str = f"{date_m.group(1)}に " if date_m else ""
                   company_match = f"[✕ {date_str}『{new_c}』へ変更]({url})"
-                  if not official_url:
-                    official_url = url
                   break
 
+        # ★【変更点】生のURLとしてデータを保持させる
         branch_list_url_raw = str(result.get("branch_list_url", "")).strip()
         branch_list_url = ""
         url_match = re.search(r'https?://[^\s)\]"\']+', branch_list_url_raw)
@@ -702,11 +717,6 @@ if submit_button:
                 br_main = extract_main_domain(extract_domain(branch_list_url))
                 if off_main and br_main and off_main != br_main:
                     branch_list_url = ""
-                    
-        if branch_list_url:
-            branch_list_md = f"[リンク]({branch_list_url})"
-        else:
-            branch_list_md = "なし"
 
         department_keywords = result.get("department_keywords", [])
         if not isinstance(department_keywords, list):
@@ -738,7 +748,7 @@ if submit_button:
             "会社名": company,
             "会社概要URL": official_url,
             "社名判定": company_match,
-            "拠点一覧": branch_list_md,
+            "拠点一覧": branch_list_url if branch_list_url else "なし",
             "部署別IT": department_text,
             "_raw_keywords": department_keywords,
             "_branch_list_url": branch_list_url,
@@ -786,11 +796,21 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
 
   for row in results:
     company_md = row.get("会社名", "").replace("\n", " ")
+    
+    # ★【変更点】表のレンダリング時にHTMLの<a>タグを使って出力（スマホのタップ無反応問題を回避）
     url = row.get("会社概要URL")
-    url_md = f"[リンク]({url})" if url else "確認できず"
-    match_md = row.get("社名判定", "")
+    url_md = f'<a href="{url}" target="_blank">{url}</a>' if url else "確認できず"
+    
+    # 社名判定のリンクも<a>タグに置換
+    match_md = str(row.get("社名判定", ""))
+    match_md = re.sub(r'\[(.*?)\]\((.*?)\)', r'<a href="\2" target="_blank">\1</a>', match_md)
 
-    branch_md = str(row.get("拠点一覧", "")).replace("\n", "<br>")
+    branch_val = str(row.get("拠点一覧", ""))
+    if branch_val.startswith("http"):
+        branch_md = f'<a href="{branch_val}" target="_blank">{branch_val}</a>'
+    else:
+        branch_md = branch_val
+
     it_prop_md = str(row.get("部署別IT", "")).replace("\n", "<br>")
 
     md_table += (
@@ -826,6 +846,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
   for row in results:
     with st.expander(f"{row['会社名']} ── 【{row['社名判定']}】"):
 
+      # ★【変更点】カードの中もリンクではなくURLそのものを表示
       if row.get("会社概要URL"):
         st.markdown(
             f"**会社概要URL:** [{row['会社概要URL']}]({row['会社概要URL']})"
@@ -836,13 +857,13 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
       match_str = str(row["社名判定"])
       if match_str == "〇" or match_str.startswith("〇"):
         st.success(f"社名判定: {match_str}")
-      elif match_str.startswith("✕") or "✕" in match_str or "[" in match_str:
+      elif match_str.startswith("✕") or "✕" in match_str or "<a" in match_str or "[" in match_str:
         st.error(f"社名判定: {match_str}")
       else:
         st.warning(f"社名判定: {match_str}")
 
       if row.get("拠点一覧") and row["拠点一覧"] != "なし":
-        st.markdown(f"**拠点一覧:** {row['拠点一覧']}")
+        st.markdown(f"**拠点一覧:** [{row['拠点一覧']}]({row['拠点一覧']})")
       else:
         st.write("**拠点一覧:** なし")
 
