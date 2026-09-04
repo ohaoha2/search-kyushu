@@ -2,6 +2,7 @@ import concurrent.futures
 import json
 import os
 import re
+import time
 from urllib.parse import urlparse
 from google import genai
 from google.genai import types
@@ -61,7 +62,7 @@ def parse_input_company(raw_text: str):
   extra_keywords = " ".join([p.strip() for p in parts[1:]]) if len(parts) > 1 else ""
 
   legal_forms_pattern = "|".join(map(re.escape, LEGAL_FORMS))
-  
+
   base_company = re.sub(r'[\s ]+(' + legal_forms_pattern + ')', r'\1', raw_company)
   base_company = re.sub(r'(' + legal_forms_pattern + ')[\s ]+', r'\1', base_company)
 
@@ -132,7 +133,7 @@ def parse_legal_entity(name: str):
   sorted_forms = sorted(LEGAL_FORMS, key=len, reverse=True)
   for form in sorted_forms:
     if normalized.startswith(form):
-      core = normalized[len(form) :]
+      core = normalized[len(form):]
       if core:
         return {
             "original": normalized,
@@ -200,24 +201,41 @@ def candidate_entity_relation(input_company: str, candidate_text: str):
   return "unknown"
 
 
-def fetch_serper_results(query: str, api_key: str):
+def fetch_serper_results(query: str, api_key: str, max_retries: int = 3):
+  """Serper APIを呼び出す。429（レート制限）や一時的なエラーは指数バックオフでリトライする。"""
   url = "https://google.serper.dev/search"
   payload = {"q": query, "gl": "jp", "hl": "ja", "num": 40}
   headers = {"X-API-KEY": api_key.strip(), "Content-Type": "application/json"}
-  response = requests.post(url, headers=headers, json=payload, timeout=20)
-  if response.status_code != 200:
-    raise Exception(
-        f"Serper API エラー (HTTP {response.status_code}): {response.text}"
-    )
-  data = response.json()
-  results = []
-  for item in data.get("organic", []):
-    results.append({
-        "title": item.get("title", ""),
-        "url": item.get("link", ""),
-        "snippet": item.get("snippet", ""),
-    })
-  return results
+
+  last_error = None
+  for attempt in range(max_retries):
+    try:
+      response = requests.post(url, headers=headers, json=payload, timeout=20)
+      if response.status_code == 200:
+        data = response.json()
+        results = []
+        for item in data.get("organic", []):
+          results.append({
+              "title": item.get("title", ""),
+              "url": item.get("link", ""),
+              "snippet": item.get("snippet", ""),
+          })
+        return results
+      if response.status_code in (429, 500, 502, 503, 504):
+        last_error = Exception(
+            f"Serper API エラー (HTTP {response.status_code}): {response.text}"
+        )
+        time.sleep(1.5 * (attempt + 1))
+        continue
+      raise Exception(
+          f"Serper API エラー (HTTP {response.status_code}): {response.text}"
+      )
+    except requests.exceptions.RequestException as e:
+      last_error = e
+      time.sleep(1.5 * (attempt + 1))
+      continue
+
+  raise last_error if last_error else Exception("Serper API 呼び出しに失敗しました")
 
 
 def scrape_page_text(url: str):
@@ -379,55 +397,12 @@ def search_company(company_input: str, api_key: str):
   if official_candidates:
     best_domain = official_candidates[0]["domain"]
 
-  q2_results = []
+  # 拠点一覧（Q2）は取得しない方針のため削除済み。
+  # 組織図・部署ページ（Q3）は部署別ITツール提案の材料として引き続き利用する。
   q3_results = []
   scraped_texts = []
 
   if best_domain:
-    q2_keywords = f"{best_domain} 拠点一覧 支店 営業所 事業所 国内拠点 アクセス ネットワーク"
-    raw_q2_results = fetch_serper_results(q2_keywords, api_key)
-
-    for r in raw_q2_results:
-      domain = extract_domain(r["url"])
-      if domain and domain == best_domain:
-        q2_results.append(r)
-
-    inferred_results = []
-    added_urls = set([r["url"] for r in q2_results])
-    for r in q2_results:
-      url = r["url"]
-      parsed = urlparse(url)
-      path = parsed.path
-
-      m = re.search(
-          r"^(.*?/(?:network|office|offices|location|locations|access|base|branch|kyoten)[/])",
-          path,
-          re.IGNORECASE,
-      )
-      if m:
-        inferred_url = f"{parsed.scheme}://{parsed.netloc}{m.group(1)}"
-        if inferred_url not in added_urls and inferred_url != url:
-          added_urls.add(inferred_url)
-          inferred_results.append({
-              "title": "【拠点一覧トップページ候補】",
-              "url": inferred_url,
-              "snippet": (
-                  "システムがURL階層から自動推測した拠点・事業所一覧のトップページです。ここを最優先で選んでください。"
-              ),
-          })
-
-    q2_results = inferred_results + q2_results
-
-    for r in q2_results[:3]:
-      url = r["url"]
-      if not url.lower().endswith(".pdf"):
-        scraped = scrape_page_text(url)
-        if scraped:
-          scraped_texts.append(
-              f"【{r['title']}】(拠点ページ URL: {url}) の直読みデータ:\n{scraped}"
-          )
-
-    # ★【新規追加】組織図・部署ページの検索とスクレイピング (Q3)
     q3_keywords = f"{best_domain} 組織図 OR 組織体制 OR 事業部 OR 部署"
     raw_q3_results = fetch_serper_results(q3_keywords, api_key)
 
@@ -450,7 +425,6 @@ def search_company(company_input: str, api_key: str):
       "company_input": company_input,
       "base_company": base_company,
       "q1_results": q1_results,
-      "q2_results": q2_results,
       "q3_results": q3_results,
       "official_candidates": official_candidates,
       "scraped_text": "\n\n".join(scraped_texts),
@@ -479,11 +453,6 @@ def analyze_companies_batch(batch_data, gemini_key):
         f" {r.get('entity_relation', 'unknown')}"
         for r in item.get("q1_results", [])[:20]
     ])
-    q2_text = "\n".join([
-        f"- タイトル: {r.get('title', '')}\n  URL: {r.get('url', '')}\n  内容:"
-        f" {r.get('snippet', '')}"
-        for r in item.get("q2_results", [])[:15]
-    ])
     q3_text = "\n".join([
         f"- タイトル: {r.get('title', '')}\n  URL: {r.get('url', '')}\n  内容:"
         f" {r.get('snippet', '')}"
@@ -499,7 +468,6 @@ def analyze_companies_batch(batch_data, gemini_key):
         f"【補足キーワード含む入力】\n{item['company_input']}\n\n"
         f"【公式サイト候補】\n{candidates_text}\n\n"
         f"【Q1検索結果（会社概要・社名変更用）】\n{q1_text if q1_text else 'なし'}\n\n"
-        f"【Q2検索結果（拠点一覧ページ用）】\n{q2_text if q2_text else '公式サイト内に該当する拠点ページが見つかりませんでした'}\n\n"
         f"【Q3検索結果（組織図・部署ページ用）】\n{q3_text if q3_text else '公式サイト内に該当する組織図ページが見つかりませんでした'}\n\n"
         f"【直読みデータ（会社詳細・部署情報など）】\n{item.get('scraped_text', '取得失敗 または 該当ページなし')}\n"
     )
@@ -514,15 +482,6 @@ def analyze_companies_batch(batch_data, gemini_key):
 対象企業の「会社概要・企業情報ページ」のURLを記載してください。
 旧社名で入力された場合でも、検索結果にある現在の新社名のコーポレートサイト/会社概要/IRページのURLを設定してください。
 【絶対ルール】：プレスリリース、ニュース記事、お知らせページ（/news/や/press/が含まれるもの）は絶対に選ばないでください。
-
-==================================================
-【拠点一覧】（拠点一覧ページのURL抽出と賢い推測）
-==================================================
-対象法人の国内の拠点（支社、支店、営業所、工場など）やネットワークが一覧で掲載されているページの「URL」を1つだけ抽出してください。
-- 会社概要（official_url）と同じドメインのURLを最優先で選んでください。
-- Q2検索結果の中に「【拠点一覧トップページ候補】」というタイトルのURLがある場合は、それが全国の拠点を網羅したトップ階層である可能性が高いため、最優先で選択してください。
-- 特定の1拠点だけを紹介している個別ページ（例：「〇〇事業所」単体のページ）は絶対に選ばないでください。
-- 該当する一覧ページが見つからない場合は、空文字 "" を設定してください。
 
 ==================================================
 【company_match】（社名判定の厳格ルール）
@@ -562,7 +521,6 @@ STEP 2: 【判定用基本社名】と【現在の最新の正式法人名】を
     "index": 0,
     "official_url": "https://.../company/profile/",
     "company_match": "〇",
-    "branch_list_url": "https://.../company/office/",
     "department_keywords": [
       {{
         "department": "デジタル事業本部",
@@ -627,13 +585,15 @@ if submit_button:
     status = st.empty()
 
     if companies_to_fetch:
-      status.text("検索中...")
+      status.text(f"検索中...（{len(companies_to_fetch)}件）")
       fetched_data = []
 
       def fetch_wrapper(comp):
         return search_company(comp, serper_api_key)
 
-      with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+      # 拠点一覧の取得をやめたことで1社あたりのリクエスト数が減ったため、
+      # 同時実行数を引き上げて全体のスループットを改善している。
+      with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = {
             executor.submit(fetch_wrapper, comp): comp
             for comp in companies_to_fetch
@@ -653,7 +613,6 @@ if submit_button:
                 "company_input": comp_name,
                 "base_company": base_c,
                 "q1_results": [],
-                "q2_results": [],
                 "q3_results": [],
                 "official_candidates": [],
                 "scraped_text": "",
@@ -663,9 +622,9 @@ if submit_button:
 
       status.text("分析中...")
       company_map = {}
-      chunk_size = 5
+      chunk_size = 8
       chunks = [
-          fetched_data[i : i + chunk_size]
+          fetched_data[i: i + chunk_size]
           for i in range(0, len(fetched_data), chunk_size)
       ]
 
@@ -713,7 +672,6 @@ if submit_button:
               "company_input": company,
               "base_company": base_c,
               "q1_results": [],
-              "q2_results": [],
               "q3_results": [],
               "official_candidates": [],
               "scraped_text": "",
@@ -765,27 +723,10 @@ if submit_button:
                   if not official_url:
                     official_url = url
                   break
-        
+
         raw_company_part = re.split(r'[\t、]+', company)[0].strip()
         if company_match.startswith("〇") and base_comp != raw_company_part:
-            company_match = "〇（スペース除去済）"
-
-        branch_list_url_raw = str(result.get("branch_list_url", "")).strip()
-        branch_list_url = ""
-        url_match = re.search(r'https?://[^\s)\]"\']+', branch_list_url_raw)
-        if url_match:
-          branch_list_url = url_match.group(0)
-
-        if branch_list_url and branch_list_url.lower() != "null":
-          if official_url:
-            off_dom = extract_domain(official_url)
-            br_dom = extract_domain(branch_list_url)
-            if off_dom and br_dom and off_dom != br_dom:
-              branch_list_url = ""
-
-        if branch_list_url and official_url:
-          if branch_list_url.rstrip("/") == official_url.rstrip("/"):
-            branch_list_url = ""
+          company_match = "〇（スペース除去済）"
 
         department_keywords = result.get("department_keywords", [])
         if not isinstance(department_keywords, list):
@@ -817,13 +758,10 @@ if submit_button:
             "会社名": base_comp,
             "会社概要URL": official_url,
             "社名判定": company_match,
-            "拠点一覧": branch_list_url if branch_list_url else "なし",
             "部署別IT": department_text if department_text else "確認できず",
             "_company_input": company,
             "_raw_keywords": department_keywords,
-            "_branch_list_url": branch_list_url,
             "_q1_results": fetched_item.get("q1_results", []),
-            "_q2_results": fetched_item.get("q2_results", []),
             "_q3_results": fetched_item.get("q3_results", []),
             "_official_candidates": fetched_item.get(
                 "official_candidates", []
@@ -858,7 +796,7 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
   st.subheader("検索結果一覧")
 
   df_display = pd.DataFrame(results)
-  expected_columns = ["会社名", "会社概要URL", "社名判定", "拠点一覧", "部署別IT"]
+  expected_columns = ["会社名", "会社概要URL", "社名判定", "部署別IT"]
 
   for col in expected_columns:
     if col not in df_display.columns:
@@ -866,8 +804,8 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
 
   df_display = df_display[expected_columns]
 
-  md_table = "| 会社名 | 会社概要URL | 社名判定 | 拠点一覧 | 部署別IT |\n"
-  md_table += "|---|---|---|---|---|\n"
+  md_table = "| 会社名 | 会社概要URL | 社名判定 | 部署別IT |\n"
+  md_table += "|---|---|---|---|\n"
 
   for row in results:
     company_md = row.get("会社名", "").replace("\n", " ")
@@ -880,17 +818,10 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
         r"\[(.*?)\]\((.*?)\)", r'<a href="\2" target="_blank">\1</a>', match_md
     )
 
-    branch_val = str(row.get("拠点一覧", ""))
-    if branch_val.startswith("http"):
-      branch_md = f'<a href="{branch_val}" target="_blank">{branch_val}</a>'
-    else:
-      branch_md = branch_val
-
     it_prop_md = str(row.get("部署別IT", "")).replace("\n", "<br>")
 
     md_table += (
-        f"| {company_md} | {url_md} | {match_md} | {branch_md} |"
-        f" {it_prop_md} |\n"
+        f"| {company_md} | {url_md} | {match_md} | {it_prop_md} |\n"
     )
 
   st.markdown(md_table, unsafe_allow_html=True)
@@ -941,11 +872,6 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
       else:
         st.warning(f"社名判定: {match_str}")
 
-      if row.get("拠点一覧") and row["拠点一覧"] != "なし":
-        st.markdown(f"**拠点一覧:** [{row['拠点一覧']}]({row['拠点一覧']})")
-      else:
-        st.write("**拠点一覧:** なし")
-
       if row.get("_raw_keywords"):
         st.markdown("**部署別IT:**")
         for item in row["_raw_keywords"]:
@@ -968,18 +894,6 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
         else:
           for idx, result in enumerate(q1_results, start=1):
             st.markdown(f"### Q1-{idx}")
-            st.write(f"**タイトル:** {result.get('title', '')}")
-            st.write(f"**URL:** {result.get('url', '')}")
-            st.write(f"**内容:** {result.get('snippet', '')}")
-            st.divider()
-
-      with st.expander("🔎 デバッグ：拠点一覧検索結果 (Q2)"):
-        q2_results = row.get("_q2_results", [])
-        if not q2_results:
-          st.write("公式サイト内に該当する拠点ページが見つかりませんでした")
-        else:
-          for idx, result in enumerate(q2_results, start=1):
-            st.markdown(f"### Q2-{idx}")
             st.write(f"**タイトル:** {result.get('title', '')}")
             st.write(f"**URL:** {result.get('url', '')}")
             st.write(f"**内容:** {result.get('snippet', '')}")
