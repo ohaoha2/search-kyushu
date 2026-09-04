@@ -210,7 +210,7 @@ def fetch_serper_results(query: str, api_key: str, max_retries: int = 3):
   last_error = None
   for attempt in range(max_retries):
     try:
-      response = requests.post(url, headers=headers, json=payload, timeout=20)
+      response = requests.post(url, headers=headers, json=payload, timeout=15)
       if response.status_code == 200:
         data = response.json()
         results = []
@@ -241,7 +241,7 @@ def fetch_serper_results(query: str, api_key: str, max_retries: int = 3):
 def scrape_page_text(url: str):
   try:
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    response = requests.get(url, headers=headers, timeout=5)
+    response = requests.get(url, headers=headers, timeout=4)
     response.encoding = response.apparent_encoding
     if response.status_code == 200:
       html = response.text
@@ -399,60 +399,98 @@ def search_company(company_input: str, api_key: str):
     best_domain = official_candidates[0]["domain"]
     official_page_url = official_candidates[0]["url"]
 
+  q3_results = []
+  q4_results = []
+  scraped_texts = []
+
+  if not best_domain:
+    return {
+        "company_input": company_input,
+        "base_company": base_company,
+        "q1_results": q1_results,
+        "q3_results": q3_results,
+        "q4_results": q4_results,
+        "official_candidates": official_candidates,
+        "scraped_text": "",
+    }
+
   # 拠点一覧（Q2）は取得しない方針のため削除済み。
   # 部署別ITツール提案の材料として、
   #   ・会社概要ページ本体
   #   ・組織図・組織体制ページ（Q3）
   #   ・採用/求人ページ（Q4。「配属先」「募集部署」に実在の部署名が明記されていることが多い）
   # を直読みして根拠データを増やす。
-  q3_results = []
-  q4_results = []
-  scraped_texts = []
+  # これらは互いに依存しないI/O待ちなので、1社の中でも並列実行して高速化する。
+  with concurrent.futures.ThreadPoolExecutor(max_workers=4) as inner:
+    official_scrape_future = None
+    if official_page_url and not official_page_url.lower().endswith(".pdf"):
+      official_scrape_future = inner.submit(scrape_page_text, official_page_url)
 
-  # 会社概要ページ自体に組織・事業部の記載があることが多いため優先的に直読みする
-  if official_page_url and not official_page_url.lower().endswith(".pdf"):
-    scraped = scrape_page_text(official_page_url)
-    if scraped:
-      scraped_texts.append(
-          f"【会社概要ページ】(URL: {official_page_url}) の直読みデータ:\n{scraped}"
-      )
+    q3_search_future = inner.submit(
+        fetch_serper_results,
+        f"{best_domain} 組織図 OR 組織体制 OR 事業部 OR 部署",
+        api_key,
+    )
+    q4_search_future = inner.submit(
+        fetch_serper_results,
+        f"{best_domain} 採用 配属先 OR 募集部署 OR 求人 部署",
+        api_key,
+    )
 
-  if best_domain:
-    q3_keywords = f"{best_domain} 組織図 OR 組織体制 OR 事業部 OR 部署"
-    raw_q3_results = fetch_serper_results(q3_keywords, api_key)
+    if official_scrape_future:
+      try:
+        scraped = official_scrape_future.result()
+      except Exception:
+        scraped = ""
+      if scraped:
+        scraped_texts.append(
+            f"【会社概要ページ】(URL: {official_page_url}) の直読みデータ:\n{scraped}"
+        )
+
+    try:
+      raw_q3_results = q3_search_future.result()
+    except Exception:
+      raw_q3_results = []
+    try:
+      raw_q4_results = q4_search_future.result()
+    except Exception:
+      raw_q4_results = []
 
     for r in raw_q3_results:
       domain = extract_domain(r["url"])
       if domain and domain == best_domain:
         q3_results.append(r)
 
-    # 組織図のページは上位2件を直読みしてAIの判断材料にする
-    for r in q3_results[:2]:
-      url = r["url"]
-      if not url.lower().endswith(".pdf") and url != official_page_url:
-        scraped = scrape_page_text(url)
-        if scraped:
-          scraped_texts.append(
-              f"【{r['title']}】(組織図・部署ページ URL: {url}) の直読みデータ:\n{scraped}"
-          )
-
-    q4_keywords = f"{best_domain} 採用 配属先 OR 募集部署 OR 求人 部署"
-    raw_q4_results = fetch_serper_results(q4_keywords, api_key)
-
     for r in raw_q4_results:
       domain = extract_domain(r["url"])
       if domain and domain == best_domain:
         q4_results.append(r)
 
-    # 採用・求人ページも上位2件を直読みする（配属先に実部署名が書かれていることが多い）
+    # 組織図ページ・採用ページの直読み（最大4件）もまとめて並列取得する
+    scrape_targets = []
+    for r in q3_results[:2]:
+      url = r["url"]
+      if not url.lower().endswith(".pdf") and url != official_page_url:
+        scrape_targets.append(("組織図・部署ページ", r["title"], url))
     for r in q4_results[:2]:
       url = r["url"]
       if not url.lower().endswith(".pdf") and url != official_page_url:
-        scraped = scrape_page_text(url)
-        if scraped:
-          scraped_texts.append(
-              f"【{r['title']}】(採用・求人ページ URL: {url}) の直読みデータ:\n{scraped}"
-          )
+        scrape_targets.append(("採用・求人ページ", r["title"], url))
+
+    scrape_futures = {
+        inner.submit(scrape_page_text, url): (label, title, url)
+        for label, title, url in scrape_targets
+    }
+    for future in concurrent.futures.as_completed(scrape_futures):
+      label, title, url = scrape_futures[future]
+      try:
+        scraped = future.result()
+      except Exception:
+        scraped = ""
+      if scraped:
+        scraped_texts.append(
+            f"【{title}】({label} URL: {url}) の直読みデータ:\n{scraped}"
+        )
 
   return {
       "company_input": company_input,
@@ -636,8 +674,9 @@ if submit_button:
       def fetch_wrapper(comp):
         return search_company(comp, serper_api_key)
 
-      # 拠点一覧の取得をやめた分、会社概要ページ・採用ページの直読みに充てているため、
-      # 1社あたりのリクエスト数は元の構成と同程度（最大7〜8件）。並列数はバランスを見て設定。
+      # 1社あたりの処理を内部でも並列化したことで1社の完了が速くなっているため、
+      # 会社間の並列数（外側）は6のままでも全体のスループットは向上する。
+      # 外側6 × 内側最大4 = 同時実行数は最大24程度に収まる想定。
       with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
         futures = {
             executor.submit(fetch_wrapper, comp): comp
@@ -678,7 +717,7 @@ if submit_button:
         res = analyze_companies_batch(chunk, gemini_key)
         return chunk, res
 
-      with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+      with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = [
             executor.submit(gemini_wrapper, chunk) for chunk in chunks
         ]
