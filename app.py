@@ -253,7 +253,7 @@ def scrape_page_text(url: str):
       )
       text = re.sub(r"<[^>]+>", " ", html)
       text = re.sub(r"\s+", " ", text).strip()
-      return text[:4000]
+      return text[:6000]
   except Exception:
     pass
   return ""
@@ -394,13 +394,28 @@ def search_company(company_input: str, api_key: str):
   official_candidates = find_official_candidates(base_company, q1_results)
 
   best_domain = None
+  official_page_url = None
   if official_candidates:
     best_domain = official_candidates[0]["domain"]
+    official_page_url = official_candidates[0]["url"]
 
   # 拠点一覧（Q2）は取得しない方針のため削除済み。
-  # 組織図・部署ページ（Q3）は部署別ITツール提案の材料として引き続き利用する。
+  # 部署別ITツール提案の材料として、
+  #   ・会社概要ページ本体
+  #   ・組織図・組織体制ページ（Q3）
+  #   ・採用/求人ページ（Q4。「配属先」「募集部署」に実在の部署名が明記されていることが多い）
+  # を直読みして根拠データを増やす。
   q3_results = []
+  q4_results = []
   scraped_texts = []
+
+  # 会社概要ページ自体に組織・事業部の記載があることが多いため優先的に直読みする
+  if official_page_url and not official_page_url.lower().endswith(".pdf"):
+    scraped = scrape_page_text(official_page_url)
+    if scraped:
+      scraped_texts.append(
+          f"【会社概要ページ】(URL: {official_page_url}) の直読みデータ:\n{scraped}"
+      )
 
   if best_domain:
     q3_keywords = f"{best_domain} 組織図 OR 組織体制 OR 事業部 OR 部署"
@@ -414,11 +429,29 @@ def search_company(company_input: str, api_key: str):
     # 組織図のページは上位2件を直読みしてAIの判断材料にする
     for r in q3_results[:2]:
       url = r["url"]
-      if not url.lower().endswith(".pdf"):
+      if not url.lower().endswith(".pdf") and url != official_page_url:
         scraped = scrape_page_text(url)
         if scraped:
           scraped_texts.append(
               f"【{r['title']}】(組織図・部署ページ URL: {url}) の直読みデータ:\n{scraped}"
+          )
+
+    q4_keywords = f"{best_domain} 採用 配属先 OR 募集部署 OR 求人 部署"
+    raw_q4_results = fetch_serper_results(q4_keywords, api_key)
+
+    for r in raw_q4_results:
+      domain = extract_domain(r["url"])
+      if domain and domain == best_domain:
+        q4_results.append(r)
+
+    # 採用・求人ページも上位2件を直読みする（配属先に実部署名が書かれていることが多い）
+    for r in q4_results[:2]:
+      url = r["url"]
+      if not url.lower().endswith(".pdf") and url != official_page_url:
+        scraped = scrape_page_text(url)
+        if scraped:
+          scraped_texts.append(
+              f"【{r['title']}】(採用・求人ページ URL: {url}) の直読みデータ:\n{scraped}"
           )
 
   return {
@@ -426,6 +459,7 @@ def search_company(company_input: str, api_key: str):
       "base_company": base_company,
       "q1_results": q1_results,
       "q3_results": q3_results,
+      "q4_results": q4_results,
       "official_candidates": official_candidates,
       "scraped_text": "\n\n".join(scraped_texts),
   }
@@ -458,6 +492,11 @@ def analyze_companies_batch(batch_data, gemini_key):
         f" {r.get('snippet', '')}"
         for r in item.get("q3_results", [])[:10]
     ])
+    q4_text = "\n".join([
+        f"- タイトル: {r.get('title', '')}\n  URL: {r.get('url', '')}\n  内容:"
+        f" {r.get('snippet', '')}"
+        for r in item.get("q4_results", [])[:10]
+    ])
     candidates_text = json.dumps(
         item.get("official_candidates", []), ensure_ascii=False, indent=2
     )
@@ -469,7 +508,8 @@ def analyze_companies_batch(batch_data, gemini_key):
         f"【公式サイト候補】\n{candidates_text}\n\n"
         f"【Q1検索結果（会社概要・社名変更用）】\n{q1_text if q1_text else 'なし'}\n\n"
         f"【Q3検索結果（組織図・部署ページ用）】\n{q3_text if q3_text else '公式サイト内に該当する組織図ページが見つかりませんでした'}\n\n"
-        f"【直読みデータ（会社詳細・部署情報など）】\n{item.get('scraped_text', '取得失敗 または 該当ページなし')}\n"
+        f"【Q4検索結果（採用・求人ページ用）】\n{q4_text if q4_text else '公式サイト内に該当する採用・求人ページが見つかりませんでした'}\n\n"
+        f"【直読みデータ（会社概要ページ・組織図ページ・採用ページの本文）】\n{item.get('scraped_text', '取得失敗 または 該当ページなし')}\n"
     )
 
   prompt = f"""
@@ -507,9 +547,14 @@ STEP 2: 【判定用基本社名】と【現在の最新の正式法人名】を
 【部署別IT】（本物の部署名の抽出）
 ==================================================
 検索結果および直読みデータの中から、【実際に公式HPに記載されている本物の部署名・事業部名】を抽出し、その部署の業務内容に合わせたITツールを3個ずつ提案してください（最大3部署まで）。
+【部署名の探し方（重要）】
+・会社概要ページの直読みデータに「事業部」「本部」「部」などの組織名が書かれていないか確認してください。
+・組織図ページの直読みデータに記載の部署・事業部名も対象にしてください。
+・採用・求人ページの直読みデータに「配属先」「募集部署」「募集職種」として書かれている部署名も、実在する本物の部署名として扱ってください（採用ページは部署名の情報源として非常に有効です）。
+・3部署に満たない場合でも、実在が確認できた分だけ（1つや2つでも）出力してください。無理に3つ揃えようとしないでください。
 【絶対禁止ルール】
 ・AIの推測で架空の部署名（データ内に明確に存在しない「営業部」「人事部」など）を勝手に作らないでください。
-・データの中に明確な部署名・事業部名が見つからない場合は、推測せず必ず空配列 [] を設定してください。
+・データの中に明確な部署名・事業部名が一つも見つからない場合のみ、推測せず空配列 [] を設定してください。
 
 {prompt_targets}
 
@@ -591,9 +636,9 @@ if submit_button:
       def fetch_wrapper(comp):
         return search_company(comp, serper_api_key)
 
-      # 拠点一覧の取得をやめたことで1社あたりのリクエスト数が減ったため、
-      # 同時実行数を引き上げて全体のスループットを改善している。
-      with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+      # 拠点一覧の取得をやめた分、会社概要ページ・採用ページの直読みに充てているため、
+      # 1社あたりのリクエスト数は元の構成と同程度（最大7〜8件）。並列数はバランスを見て設定。
+      with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
         futures = {
             executor.submit(fetch_wrapper, comp): comp
             for comp in companies_to_fetch
@@ -614,6 +659,7 @@ if submit_button:
                 "base_company": base_c,
                 "q1_results": [],
                 "q3_results": [],
+                "q4_results": [],
                 "official_candidates": [],
                 "scraped_text": "",
             })
@@ -673,6 +719,7 @@ if submit_button:
               "base_company": base_c,
               "q1_results": [],
               "q3_results": [],
+              "q4_results": [],
               "official_candidates": [],
               "scraped_text": "",
           }
@@ -763,6 +810,7 @@ if submit_button:
             "_raw_keywords": department_keywords,
             "_q1_results": fetched_item.get("q1_results", []),
             "_q3_results": fetched_item.get("q3_results", []),
+            "_q4_results": fetched_item.get("q4_results", []),
             "_official_candidates": fetched_item.get(
                 "official_candidates", []
             ),
@@ -906,6 +954,18 @@ if "batch_results" in st.session_state and st.session_state["batch_results"]:
         else:
           for idx, result in enumerate(q3_results, start=1):
             st.markdown(f"### Q3-{idx}")
+            st.write(f"**タイトル:** {result.get('title', '')}")
+            st.write(f"**URL:** {result.get('url', '')}")
+            st.write(f"**内容:** {result.get('snippet', '')}")
+            st.divider()
+
+      with st.expander("🔎 デバッグ：採用・求人ページ検索結果 (Q4)"):
+        q4_results = row.get("_q4_results", [])
+        if not q4_results:
+          st.write("公式サイト内に該当する採用・求人ページが見つかりませんでした")
+        else:
+          for idx, result in enumerate(q4_results, start=1):
+            st.markdown(f"### Q4-{idx}")
             st.write(f"**タイトル:** {result.get('title', '')}")
             st.write(f"**URL:** {result.get('url', '')}")
             st.write(f"**内容:** {result.get('snippet', '')}")
